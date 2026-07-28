@@ -2,6 +2,8 @@
 
 This is a public transcript service made for web-searching AI tools.
 
+Live site: https://transcript-registry.vercel.app
+
 People only paste a missing YouTube link. The central worker then:
 
 1. uses creator captions when available;

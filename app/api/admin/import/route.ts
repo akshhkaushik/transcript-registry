@@ -1,4 +1,4 @@
-import { saveTranscript } from "../../../../db/store";
+import { saveTranscripts } from "../../../../db/store";
 import { jsonResponse, workerAuthorized } from "../../../../lib/http";
 import { coerceTranscript } from "../../../../lib/transcript";
 
@@ -17,18 +17,23 @@ export async function POST(request: Request): Promise<Response> {
       { status: 400 },
     );
   }
-  let imported = 0;
-  const errors: Array<{ index: number; error: string }> = [];
-  for (const [index, item] of body.records.entries()) {
-    try {
-      await saveTranscript(await coerceTranscript(item));
-      imported += 1;
-    } catch (error) {
-      errors.push({
-        index,
-        error: error instanceof Error ? error.message : "Invalid record",
-      });
-    }
+  try {
+    const transcripts = await Promise.all(
+      body.records.map((record) => coerceTranscript(record)),
+    );
+    await saveTranscripts(transcripts);
+    return jsonResponse({ imported: transcripts.length, errors: [] });
+  } catch (error) {
+    return jsonResponse(
+      {
+        imported: 0,
+        errors: [
+          {
+            error: error instanceof Error ? error.message : "Invalid record",
+          },
+        ],
+      },
+      { status: 400 },
+    );
   }
-  return jsonResponse({ imported, errors }, { status: errors.length ? 207 : 200 });
 }

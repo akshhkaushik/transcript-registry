@@ -91,10 +91,19 @@ export async function getTranscript(
 export async function saveTranscript(
   transcript: TranscriptRecord,
 ): Promise<void> {
+  await saveTranscripts([transcript]);
+}
+
+export async function saveTranscripts(
+  transcripts: TranscriptRecord[],
+): Promise<void> {
   await ensureDatabase();
-  const clean = validateTranscript(transcript);
-  await rawDb()
-    .prepare(`
+  if (!transcripts.length) return;
+  const db = rawDb();
+  const statements = transcripts.map((transcript) => {
+    const clean = validateTranscript(transcript);
+    return db
+      .prepare(`
       INSERT INTO transcripts (
         id, provider, provider_id, source_url, title, channel, channel_url,
         description, published_at, duration_seconds, language,
@@ -120,28 +129,29 @@ export async function saveTranscript(
         checksum = excluded.checksum,
         updated_at = CURRENT_TIMESTAMP
     `)
-    .bind(
-      clean.id,
-      clean.provider,
-      clean.providerId,
-      clean.sourceUrl,
-      clean.title,
-      clean.channel,
-      clean.channelUrl,
-      clean.description,
-      clean.publishedAt,
-      clean.durationSeconds,
-      clean.language,
-      clean.transcriptSource,
-      clean.license,
-      clean.attribution,
-      JSON.stringify(clean.topics),
-      clean.transcriptText,
-      JSON.stringify(clean.segments),
-      clean.wordCount,
-      clean.checksum,
-    )
-    .run();
+      .bind(
+        clean.id,
+        clean.provider,
+        clean.providerId,
+        clean.sourceUrl,
+        clean.title,
+        clean.channel,
+        clean.channelUrl,
+        clean.description,
+        clean.publishedAt,
+        clean.durationSeconds,
+        clean.language,
+        clean.transcriptSource,
+        clean.license,
+        clean.attribution,
+        JSON.stringify(clean.topics),
+        clean.transcriptText,
+        JSON.stringify(clean.segments),
+        clean.wordCount,
+        clean.checksum,
+      );
+  });
+  await db.batch(statements);
 }
 
 export async function createOrFindJob(input: {

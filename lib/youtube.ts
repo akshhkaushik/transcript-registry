@@ -6,6 +6,11 @@ export type ResolvedSource = {
   canonicalUrl: string;
 };
 
+export type ResolvedChannel = {
+  inputUrl: string;
+  normalizedUrl: string;
+};
+
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 export function resolveSource(input: string): ResolvedSource | null {
@@ -44,6 +49,26 @@ export function resolveSource(input: string): ResolvedSource | null {
   }
 
   return id && VIDEO_ID.test(id) ? youtube(id) : null;
+}
+
+export function resolveChannelSource(input: string): ResolvedChannel | null {
+  let url: URL;
+  try {
+    url = new URL(input.trim());
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  if (host !== "youtube.com" && host !== "m.youtube.com") return null;
+  const parts = url.pathname.split("/").filter(Boolean);
+  const [kind, value] = parts;
+  const supported =
+    (kind?.startsWith("@") && kind.length > 1) ||
+    (["channel", "user", "c"].includes(kind ?? "") && Boolean(value));
+  if (!supported) return null;
+  const baseParts = kind?.startsWith("@") ? [kind] : [kind, value];
+  const normalizedUrl = `https://www.youtube.com/${baseParts.join("/")}`;
+  return { inputUrl: url.toString(), normalizedUrl };
 }
 
 function youtube(providerId: string): ResolvedSource {

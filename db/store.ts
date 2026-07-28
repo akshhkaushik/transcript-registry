@@ -5,21 +5,33 @@ import {
   desc,
   eq,
   gte,
+  inArray,
+  isNotNull,
   lt,
   sql,
 } from "drizzle-orm";
 import type {
+  ChannelJob,
+  ChannelProgress,
   IngestionJob,
   TopicJob,
   TranscriptRecord,
   TranscriptSegment,
 } from "../lib/types";
 import { getDb } from "./index";
-import { jobs, submissionEvents, topicJobs, transcripts } from "./schema";
+import {
+  channelJobs,
+  channelVideos,
+  jobs,
+  submissionEvents,
+  topicJobs,
+  transcripts,
+} from "./schema";
 import { ensureDatabase } from "./runtime";
 
 type TranscriptRow = typeof transcripts.$inferSelect;
 type JobRow = typeof jobs.$inferSelect;
+type ChannelJobRow = typeof channelJobs.$inferSelect;
 type TopicJobRow = typeof topicJobs.$inferSelect;
 
 const STOP_WORDS = new Set([
@@ -134,6 +146,328 @@ export async function saveTranscripts(
     });
 }
 
+export async function createOrRefreshChannelJob(
+  input: {
+    inputUrl: string;
+    normalizedUrl: string;
+  },
+  options: {
+    batchSize?: number;
+    concurrency?: number;
+    force?: boolean;
+  } = {},
+): Promise<{ job: ChannelProgress; created: boolean; refreshed: boolean }> {
+  await ensureDatabase();
+  const batchSize = Math.max(10, Math.min(options.batchSize ?? 50, 100));
+  const concurrency = Math.max(1, Math.min(options.concurrency ?? 4, 8));
+  const database = getDb();
+  const [created] = await database
+    .insert(channelJobs)
+    .values({
+      id: crypto.randomUUID(),
+      inputUrl: input.inputUrl,
+      normalizedUrl: input.normalizedUrl,
+      batchSize,
+      concurrency,
+    })
+    .onConflictDoNothing({ target: channelJobs.normalizedUrl })
+    .returning();
+  if (created) {
+    return {
+      job: await getChannelProgress(created.id).then(requiredChannel),
+      created: true,
+      refreshed: false,
+    };
+  }
+
+  const [existing] = await database
+    .select()
+    .from(channelJobs)
+    .where(eq(channelJobs.normalizedUrl, input.normalizedUrl))
+    .limit(1);
+  if (!existing) throw new Error("Channel job was not created");
+  const active = ["queued", "discovering", "processing"].includes(
+    existing.status,
+  );
+  const recentlyCompleted =
+    existing.status === "complete" &&
+    Date.parse(existing.updatedAt) > Date.now() - 6 * 60 * 60 * 1000;
+  if (active || (recentlyCompleted && !options.force)) {
+    return {
+      job: await getChannelProgress(existing.id).then(requiredChannel),
+      created: false,
+      refreshed: false,
+    };
+  }
+
+  await database
+    .update(channelJobs)
+    .set({
+      inputUrl: input.inputUrl,
+      status: "queued",
+      batchSize,
+      concurrency,
+      batchesReceived: 0,
+      attempts: 0,
+      workerId: null,
+      error: null,
+      claimedAt: null,
+      discoveryCompletedAt: null,
+      completedAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(channelJobs.id, existing.id));
+  return {
+    job: await getChannelProgress(existing.id).then(requiredChannel),
+    created: false,
+    refreshed: true,
+  };
+}
+
+export async function claimChannelJob(
+  workerId: string,
+): Promise<ChannelJob | null> {
+  await ensureDatabase();
+  const database = getDb();
+  const staleBefore = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  await database
+    .update(channelJobs)
+    .set({
+      status: "queued",
+      workerId: null,
+      claimedAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(channelJobs.status, "discovering"),
+        lt(channelJobs.claimedAt, staleBefore),
+        lt(channelJobs.attempts, 3),
+      ),
+    );
+  const [candidate] = await database
+    .select({ id: channelJobs.id })
+    .from(channelJobs)
+    .where(and(eq(channelJobs.status, "queued"), lt(channelJobs.attempts, 3)))
+    .orderBy(asc(channelJobs.createdAt))
+    .limit(1);
+  if (!candidate) return null;
+  const [claimed] = await database
+    .update(channelJobs)
+    .set({
+      status: "discovering",
+      workerId,
+      attempts: sql`${channelJobs.attempts} + 1`,
+      claimedAt: sql`CURRENT_TIMESTAMP`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(channelJobs.id, candidate.id),
+        eq(channelJobs.status, "queued"),
+      ),
+    )
+    .returning();
+  return claimed ? mapChannelJob(claimed) : null;
+}
+
+export async function ingestChannelBatch(
+  id: string,
+  input: {
+    channelId?: string;
+    channelName?: string;
+    channelUrl?: string;
+    reportedVideoCount?: number;
+    videos: Array<{
+      providerId: string;
+      sourceUrl: string;
+      title?: string;
+    }>;
+  },
+): Promise<{
+  received: number;
+  inserted: number;
+  alreadyAvailable: number;
+  queued: number;
+}> {
+  await ensureDatabase();
+  const database = getDb();
+  const [channel] = await database
+    .select({ id: channelJobs.id })
+    .from(channelJobs)
+    .where(eq(channelJobs.id, id))
+    .limit(1);
+  if (!channel) throw new Error("Channel job not found");
+  const sources = [
+    ...new Map(
+      input.videos.map((video) => [video.providerId, video]),
+    ).values(),
+  ].slice(0, 100);
+  if (!sources.length) {
+    await updateChannelMetadata(id, input, false);
+    return { received: 0, inserted: 0, alreadyAvailable: 0, queued: 0 };
+  }
+  const providerIds = sources.map((source) => source.providerId);
+  const existingRows = await database
+    .select({ providerId: channelVideos.providerId })
+    .from(channelVideos)
+    .where(
+      and(
+        eq(channelVideos.channelJobId, id),
+        inArray(channelVideos.providerId, providerIds),
+      ),
+    );
+  const existingIds = new Set(existingRows.map((row) => row.providerId));
+  const newSources = sources.filter(
+    (source) => !existingIds.has(source.providerId),
+  );
+  if (!newSources.length) {
+    await updateChannelMetadata(id, input, true);
+    return {
+      received: sources.length,
+      inserted: 0,
+      alreadyAvailable: 0,
+      queued: 0,
+    };
+  }
+
+  const newIds = newSources.map((source) => source.providerId);
+  const availableRows = await database
+    .select({ providerId: transcripts.providerId })
+    .from(transcripts)
+    .where(
+      and(
+        eq(transcripts.provider, "youtube"),
+        inArray(transcripts.providerId, newIds),
+      ),
+    );
+  const availableIds = new Set(availableRows.map((row) => row.providerId));
+  const needingJobs = newSources.filter(
+    (source) => !availableIds.has(source.providerId),
+  );
+  if (needingJobs.length) {
+    await database
+      .insert(jobs)
+      .values(
+        needingJobs.map((source) => ({
+          id: crypto.randomUUID(),
+          provider: "youtube",
+          providerId: source.providerId,
+          sourceUrl: source.sourceUrl,
+        })),
+      )
+      .onConflictDoNothing({
+        target: [jobs.provider, jobs.providerId],
+      });
+  }
+  const jobRows = needingJobs.length
+    ? await database
+        .select({
+          id: jobs.id,
+          providerId: jobs.providerId,
+          status: jobs.status,
+        })
+        .from(jobs)
+        .where(
+          and(
+            eq(jobs.provider, "youtube"),
+            inArray(
+              jobs.providerId,
+              needingJobs.map((source) => source.providerId),
+            ),
+          ),
+        )
+    : [];
+  const jobsByVideo = new Map(jobRows.map((row) => [row.providerId, row]));
+  await database.insert(channelVideos).values(
+    newSources.map((source) => {
+      const job = jobsByVideo.get(source.providerId);
+      return {
+        id: `${id}:${source.providerId}`,
+        channelJobId: id,
+        provider: "youtube",
+        providerId: source.providerId,
+        sourceUrl: source.sourceUrl,
+        title: source.title?.trim().slice(0, 500) ?? "",
+        jobId: job?.id ?? null,
+        status: availableIds.has(source.providerId)
+          ? "complete"
+          : normalizeVideoJobStatus(job?.status),
+      };
+    }),
+  );
+  await updateChannelMetadata(id, input, true);
+  return {
+    received: sources.length,
+    inserted: newSources.length,
+    alreadyAvailable: newSources.filter((source) =>
+      availableIds.has(source.providerId),
+    ).length,
+    queued: newSources.filter(
+      (source) => !availableIds.has(source.providerId),
+    ).length,
+  };
+}
+
+export async function completeChannelDiscovery(id: string): Promise<void> {
+  await ensureDatabase();
+  await getDb()
+    .update(channelJobs)
+    .set({
+      status: "processing",
+      error: null,
+      discoveryCompletedAt: sql`CURRENT_TIMESTAMP`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(channelJobs.id, id));
+  await refreshChannelCompletion(id);
+}
+
+export async function failChannelJob(id: string, error: string): Promise<void> {
+  await ensureDatabase();
+  const [job] = await getDb()
+    .select()
+    .from(channelJobs)
+    .where(eq(channelJobs.id, id))
+    .limit(1);
+  if (!job) throw new Error("Channel job not found");
+  await getDb()
+    .update(channelJobs)
+    .set({
+      status: job.attempts >= 3 ? "failed" : "queued",
+      error: error.slice(0, 1000),
+      workerId: null,
+      claimedAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(channelJobs.id, id));
+}
+
+export async function getChannelProgress(
+  id: string,
+): Promise<ChannelProgress | null> {
+  await ensureDatabase();
+  const [row] = await getDb()
+    .select()
+    .from(channelJobs)
+    .where(eq(channelJobs.id, id))
+    .limit(1);
+  if (!row) return null;
+  return channelProgress(mapChannelJob(row));
+}
+
+export async function listChannelProgress(
+  limit = 25,
+): Promise<ChannelProgress[]> {
+  await ensureDatabase();
+  const rows = await getDb()
+    .select()
+    .from(channelJobs)
+    .orderBy(desc(channelJobs.createdAt))
+    .limit(Math.max(1, Math.min(limit, 100)));
+  return Promise.all(rows.map((row) => channelProgress(mapChannelJob(row))));
+}
+
 export async function createOrFindJob(input: {
   provider: "youtube";
   providerId: string;
@@ -181,8 +515,16 @@ export async function getJob(id: string): Promise<IngestionJob | null> {
 }
 
 export async function claimJob(workerId: string): Promise<IngestionJob | null> {
+  return (await claimJobs(workerId, 1))[0] ?? null;
+}
+
+export async function claimJobs(
+  workerId: string,
+  limit = 1,
+): Promise<IngestionJob[]> {
   await ensureDatabase();
   const database = getDb();
+  const safeLimit = Math.max(1, Math.min(limit, 10));
   const staleBefore = new Date(Date.now() - 45 * 60 * 1000).toISOString();
 
   await database
@@ -201,15 +543,15 @@ export async function claimJob(workerId: string): Promise<IngestionJob | null> {
       ),
     );
 
-  const [candidate] = await database
+  const candidates = await database
     .select({ id: jobs.id })
     .from(jobs)
     .where(and(eq(jobs.status, "queued"), lt(jobs.attempts, 3)))
     .orderBy(asc(jobs.createdAt))
-    .limit(1);
-  if (!candidate) return null;
+    .limit(safeLimit);
+  if (!candidates.length) return [];
 
-  const [claimed] = await database
+  const claimed = await database
     .update(jobs)
     .set({
       status: "processing",
@@ -218,14 +560,37 @@ export async function claimJob(workerId: string): Promise<IngestionJob | null> {
       claimedAt: sql`CURRENT_TIMESTAMP`,
       updatedAt: sql`CURRENT_TIMESTAMP`,
     })
-    .where(and(eq(jobs.id, candidate.id), eq(jobs.status, "queued")))
+    .where(
+      and(
+        inArray(
+          jobs.id,
+          candidates.map((candidate) => candidate.id),
+        ),
+        eq(jobs.status, "queued"),
+      ),
+    )
     .returning();
-  return claimed ? mapJob(claimed) : null;
+  if (claimed.length) {
+    await database
+      .update(channelVideos)
+      .set({
+        status: "processing",
+        updatedAt: sql`CURRENT_TIMESTAMP`,
+      })
+      .where(
+        inArray(
+          channelVideos.jobId,
+          claimed.map((job) => job.id),
+        ),
+      );
+  }
+  return claimed.map(mapJob);
 }
 
 export async function completeJob(
   id: string,
   transcript: TranscriptRecord,
+  processingSeconds?: number,
 ): Promise<void> {
   const job = await getJob(id);
   if (!job) throw new Error("Job not found");
@@ -241,13 +606,27 @@ export async function completeJob(
     .set({
       status: "complete",
       error: null,
+      processingSeconds:
+        processingSeconds == null
+          ? job.processingSeconds
+          : Math.max(0, Math.round(processingSeconds)),
       completedAt: sql`CURRENT_TIMESTAMP`,
       updatedAt: sql`CURRENT_TIMESTAMP`,
     })
     .where(eq(jobs.id, id));
+  await getDb()
+    .update(channelVideos)
+    .set({ status: "complete", updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(channelVideos.jobId, id));
+  const channelIds = await channelIdsForJob(id);
+  await Promise.all(channelIds.map(refreshChannelCompletion));
 }
 
-export async function failJob(id: string, error: string): Promise<void> {
+export async function failJob(
+  id: string,
+  error: string,
+  processingSeconds?: number,
+): Promise<void> {
   await ensureDatabase();
   const job = await getJob(id);
   if (!job) throw new Error("Job not found");
@@ -256,11 +635,24 @@ export async function failJob(id: string, error: string): Promise<void> {
     .set({
       status: job.attempts >= 3 ? "failed" : "queued",
       error: error.slice(0, 1000),
+      processingSeconds:
+        processingSeconds == null
+          ? job.processingSeconds
+          : Math.max(0, Math.round(processingSeconds)),
       workerId: null,
       claimedAt: null,
       updatedAt: sql`CURRENT_TIMESTAMP`,
     })
     .where(eq(jobs.id, id));
+  await getDb()
+    .update(channelVideos)
+    .set({
+      status: job.attempts >= 3 ? "failed" : "queued",
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(channelVideos.jobId, id));
+  const channelIds = await channelIdsForJob(id);
+  await Promise.all(channelIds.map(refreshChannelCompletion));
 }
 
 export async function getTopicJob(id: string): Promise<TopicJob | null> {
@@ -482,6 +874,9 @@ export async function getCounts(): Promise<{
   processing: number;
   topicQueued: number;
   topicProcessing: number;
+  channelQueued: number;
+  channelDiscovering: number;
+  channelProcessing: number;
 }> {
   await ensureDatabase();
   const database = getDb();
@@ -491,6 +886,9 @@ export async function getCounts(): Promise<{
     [processingCount],
     [topicQueuedCount],
     [topicProcessingCount],
+    [channelQueuedCount],
+    [channelDiscoveringCount],
+    [channelProcessingCount],
   ] =
     await Promise.all([
       database.select({ value: count() }).from(transcripts),
@@ -510,6 +908,18 @@ export async function getCounts(): Promise<{
         .select({ value: count() })
         .from(topicJobs)
         .where(eq(topicJobs.status, "processing")),
+      database
+        .select({ value: count() })
+        .from(channelJobs)
+        .where(eq(channelJobs.status, "queued")),
+      database
+        .select({ value: count() })
+        .from(channelJobs)
+        .where(eq(channelJobs.status, "discovering")),
+      database
+        .select({ value: count() })
+        .from(channelJobs)
+        .where(eq(channelJobs.status, "processing")),
     ]);
   return {
     transcripts: transcriptCount?.value ?? 0,
@@ -517,6 +927,9 @@ export async function getCounts(): Promise<{
     processing: processingCount?.value ?? 0,
     topicQueued: topicQueuedCount?.value ?? 0,
     topicProcessing: topicProcessingCount?.value ?? 0,
+    channelQueued: channelQueuedCount?.value ?? 0,
+    channelDiscovering: channelDiscoveringCount?.value ?? 0,
+    channelProcessing: channelProcessingCount?.value ?? 0,
   };
 }
 
@@ -564,6 +977,183 @@ export function meaningfulTokens(query: string): string[] {
 
 export function normalizeTopicQuery(query: string): string {
   return meaningfulTokens(query).join(" ");
+}
+
+async function updateChannelMetadata(
+  id: string,
+  input: {
+    channelId?: string;
+    channelName?: string;
+    channelUrl?: string;
+    reportedVideoCount?: number;
+  },
+  incrementBatch: boolean,
+): Promise<void> {
+  await getDb()
+    .update(channelJobs)
+    .set({
+      ...(input.channelId
+        ? { channelId: input.channelId.trim().slice(0, 200) }
+        : {}),
+      ...(input.channelName
+        ? { channelName: input.channelName.trim().slice(0, 500) }
+        : {}),
+      ...(input.channelUrl
+        ? { channelUrl: input.channelUrl.trim().slice(0, 1000) }
+        : {}),
+      ...(Number.isFinite(input.reportedVideoCount)
+        ? {
+            reportedVideoCount: Math.max(
+              0,
+              Math.round(input.reportedVideoCount ?? 0),
+            ),
+          }
+        : {}),
+      ...(incrementBatch
+        ? { batchesReceived: sql`${channelJobs.batchesReceived} + 1` }
+        : {}),
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(channelJobs.id, id));
+}
+
+async function channelProgress(job: ChannelJob): Promise<ChannelProgress> {
+  const database = getDb();
+  const [stats] = await database
+    .select({
+      discovered: count(),
+      completed: sql<number>`count(*) filter (where ${channelVideos.status} = 'complete')`,
+      queued: sql<number>`count(*) filter (where ${channelVideos.status} = 'queued')`,
+      processing: sql<number>`count(*) filter (where ${channelVideos.status} = 'processing')`,
+      failed: sql<number>`count(*) filter (where ${channelVideos.status} = 'failed')`,
+      averageSeconds: sql<number | null>`avg(${jobs.processingSeconds}) filter (
+        where ${channelVideos.status} = 'complete'
+        and ${jobs.processingSeconds} is not null
+      )`,
+    })
+    .from(channelVideos)
+    .leftJoin(jobs, eq(channelVideos.jobId, jobs.id))
+    .where(eq(channelVideos.channelJobId, job.id));
+  const discoveredVideos = Number(stats?.discovered ?? 0);
+  const completedVideos = Number(stats?.completed ?? 0);
+  const queuedVideos = Number(stats?.queued ?? 0);
+  const processingVideos = Number(stats?.processing ?? 0);
+  const failedVideos = Number(stats?.failed ?? 0);
+  let averageProcessingSeconds =
+    stats?.averageSeconds == null ? null : Number(stats.averageSeconds);
+  if (!averageProcessingSeconds && queuedVideos + processingVideos > 0) {
+    const [globalTiming] = await database
+      .select({
+        averageSeconds: sql<number | null>`avg(${jobs.processingSeconds})`,
+      })
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.status, "complete"),
+          isNotNull(jobs.processingSeconds),
+        ),
+      );
+    averageProcessingSeconds =
+      globalTiming?.averageSeconds == null
+        ? null
+        : Number(globalTiming.averageSeconds);
+  }
+  const terminalVideos = completedVideos + failedVideos;
+  const denominator = Math.max(
+    discoveredVideos,
+    job.reportedVideoCount ?? 0,
+  );
+  const undiscovered = Math.max(0, denominator - discoveredVideos);
+  const remaining = queuedVideos + processingVideos + undiscovered;
+  const started = Date.parse(job.claimedAt ?? job.createdAt);
+  const ended = job.completedAt ? Date.parse(job.completedAt) : Date.now();
+  const elapsedSeconds = Math.max(0, Math.round((ended - started) / 1000));
+  const observedVideosPerMinute =
+    terminalVideos >= 3 && elapsedSeconds > 0
+      ? (terminalVideos * 60) / elapsedSeconds
+      : null;
+  const estimatedSecondsRemaining =
+    remaining === 0
+      ? 0
+      : observedVideosPerMinute
+        ? Math.ceil((remaining / observedVideosPerMinute) * 60)
+        : averageProcessingSeconds
+          ? Math.ceil(
+              (remaining * averageProcessingSeconds) /
+                Math.max(1, job.concurrency),
+            )
+          : null;
+  return {
+    ...job,
+    discoveredVideos,
+    completedVideos,
+    queuedVideos,
+    processingVideos,
+    failedVideos,
+    elapsedSeconds,
+    averageProcessingSeconds,
+    observedVideosPerMinute,
+    estimatedSecondsRemaining,
+    progressPercent:
+      denominator > 0
+        ? Math.min(100, Math.round((terminalVideos / denominator) * 100))
+        : 0,
+  };
+}
+
+async function refreshChannelCompletion(id: string): Promise<void> {
+  const database = getDb();
+  const [channel] = await database
+    .select({
+      discoveryCompletedAt: channelJobs.discoveryCompletedAt,
+      status: channelJobs.status,
+    })
+    .from(channelJobs)
+    .where(eq(channelJobs.id, id))
+    .limit(1);
+  if (
+    !channel?.discoveryCompletedAt ||
+    channel.status === "failed"
+  ) {
+    return;
+  }
+  const [pending] = await database
+    .select({ value: count() })
+    .from(channelVideos)
+    .where(
+      and(
+        eq(channelVideos.channelJobId, id),
+        inArray(channelVideos.status, ["queued", "processing"]),
+      ),
+    );
+  const complete = Number(pending?.value ?? 0) === 0;
+  await database
+    .update(channelJobs)
+    .set({
+      status: complete ? "complete" : "processing",
+      ...(complete ? { completedAt: sql`CURRENT_TIMESTAMP` } : {}),
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(channelJobs.id, id));
+}
+
+async function channelIdsForJob(id: string): Promise<string[]> {
+  const rows = await getDb()
+    .select({ channelJobId: channelVideos.channelJobId })
+    .from(channelVideos)
+    .where(eq(channelVideos.jobId, id));
+  return [...new Set(rows.map((row) => row.channelJobId))];
+}
+
+function normalizeVideoJobStatus(status?: string): string {
+  return ["queued", "processing", "complete", "failed"].includes(status ?? "")
+    ? String(status)
+    : "queued";
+}
+
+function requiredChannel(value: ChannelProgress | null): ChannelProgress {
+  if (!value) throw new Error("Channel job not found");
+  return value;
 }
 
 function validateTranscript(value: TranscriptRecord): TranscriptRecord {
@@ -635,9 +1225,34 @@ function mapJob(row: JobRow): IngestionJob {
     attempts: row.attempts,
     workerId: row.workerId,
     error: row.error,
+    processingSeconds: row.processingSeconds,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     claimedAt: row.claimedAt,
+    completedAt: row.completedAt,
+  };
+}
+
+function mapChannelJob(row: ChannelJobRow): ChannelJob {
+  return {
+    id: row.id,
+    inputUrl: row.inputUrl,
+    normalizedUrl: row.normalizedUrl,
+    channelId: row.channelId,
+    channelName: row.channelName,
+    channelUrl: row.channelUrl,
+    status: row.status as ChannelJob["status"],
+    reportedVideoCount: row.reportedVideoCount,
+    batchSize: row.batchSize,
+    concurrency: row.concurrency,
+    batchesReceived: row.batchesReceived,
+    attempts: row.attempts,
+    workerId: row.workerId,
+    error: row.error,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    claimedAt: row.claimedAt,
+    discoveryCompletedAt: row.discoveryCompletedAt,
     completedAt: row.completedAt,
   };
 }

@@ -15,13 +15,21 @@ export async function POST(
   const job = await getJob(id);
   if (!job) return jsonResponse({ error: "Job not found" }, { status: 404 });
   try {
-    const payload = await request.json();
+    const payload = (await request.json()) as {
+      processingSeconds?: unknown;
+    };
     const transcript = await coerceTranscript(payload, {
       provider: job.provider,
       providerId: job.providerId,
       sourceUrl: job.sourceUrl,
     });
-    await completeJob(id, transcript);
+    await completeJob(
+      id,
+      transcript,
+      typeof payload.processingSeconds === "number"
+        ? payload.processingSeconds
+        : undefined,
+    );
     return jsonResponse({
       status: "complete",
       transcript: `/youtube/${job.providerId}`,

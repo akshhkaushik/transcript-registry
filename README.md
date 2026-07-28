@@ -12,7 +12,8 @@ Live site: https://transcript-registry.vercel.app
 3. A zero-result search creates a topic-discovery job automatically. The
    response gives agents a `/topics/JOB_ID.json` URL to poll.
 4. A local worker discovers matching captioned Creative Commons videos and
-   queues them. People can also paste one missing YouTube link on the home page.
+   queues them. People can also paste one missing video or a complete YouTube
+   channel on the home page.
 5. The background worker gets existing captions first. If captions are missing
    and the source is permitted, it can transcribe audio with MLX Whisper or
    whisper.cpp.
@@ -27,7 +28,26 @@ Useful public URLs:
 - `/youtube/VIDEO_ID.txt`
 - `/youtube/VIDEO_ID.json`
 - `/topics/JOB_ID.json`
+- `/channels/CHANNEL_JOB_ID`
+- `/channels/CHANNEL_JOB_ID.json`
 - `/llms.txt`
+
+## Add a complete channel
+
+Paste a channel URL such as `https://www.youtube.com/@channel` on the home
+page. Registry creates one channel job and the local worker:
+
+1. resolves the channel's uploads playlist;
+2. enumerates every public upload through the official paginated YouTube API,
+   or streams the Videos, Shorts, and Live tabs with `yt-dlp`;
+3. sends deduplicated batches of 50 videos to Registry;
+4. processes up to four caption jobs concurrently;
+5. allows only one permissioned local ASR job at a time by default.
+
+The public channel page shows discovery batches, reported and discovered
+videos, queued/processing/completed/failed counts, measured seconds per video,
+elapsed time, progress, and ETA. Re-submitting a completed channel after six
+hours checks for new uploads without duplicating old records.
 
 ## Run the website locally
 
@@ -56,6 +76,17 @@ MLX Whisper on Apple Silicon or configure whisper.cpp. An optional
 `YOUTUBE_API_KEY` makes discovery use YouTube's official API with captioned and
 Creative Commons filters; without it, discovery falls back to local `yt-dlp`
 search.
+
+Tune bounded concurrency in `.env.worker`:
+
+```sh
+WORKER_CONCURRENCY=4
+ASR_CONCURRENCY=1
+CHANNEL_BATCH_SIZE=50
+```
+
+Increasing caption concurrency can improve throughput. Keep ASR concurrency
+low unless the machine has enough unified memory for multiple Whisper models.
 
 The companion
 [transcript-commons](https://github.com/akshhkaushik/transcript-commons)

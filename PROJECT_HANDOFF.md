@@ -174,6 +174,17 @@ It can:
 The worker is deliberately separate from Vercel. Vercel stores and serves
 results; a worker performs long-running discovery and transcription.
 
+The macOS worker is currently managed by the LaunchAgent
+`chatgpt.transcript-registry.worker`. Its configured Python and `yt-dlp`
+executables live inside this repository's `.venv/`. Before removing or
+recreating `.venv/`, unload the LaunchAgent. After rebuilding the environment,
+restart it and confirm that it is running:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/chatgpt.transcript-registry.worker
+launchctl print gui/$(id -u)/chatgpt.transcript-registry.worker
+```
+
 ## Data and migrations
 
 - Drizzle schema: `db/schema.ts`
@@ -411,11 +422,16 @@ Safe to recreate and remove when not in use:
 
 - `.next/`
 - `node_modules/`
-- `.venv/`
 - `.models/`
 - Python `__pycache__/`
 - `tsconfig.tsbuildinfo`
 - ignored worker logs under `work/`
+
+`.venv/` and `work/` are not disposable while the macOS LaunchAgent is
+loaded. The LaunchAgent runs `.venv/bin/python`, `yt-dlp` is configured at
+`.venv/bin/yt-dlp`, and its logs live under `work/`. If `.venv/` is removed,
+recreate it with `python3 -m venv .venv` and install
+`worker/requirements.txt` before restarting the worker.
 
 Do not remove:
 

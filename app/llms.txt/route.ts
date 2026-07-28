@@ -1,0 +1,23 @@
+import { textResponse } from "../../lib/http";
+
+export async function GET(request: Request): Promise<Response> {
+  const origin = new URL(request.url).origin;
+  return textResponse(
+    [
+      "# Transcript Registry",
+      "",
+      "Public, machine-readable video transcripts.",
+      "",
+      `Search: ${origin}/search.txt?q=QUERY`,
+      `Search JSON: ${origin}/search.json?q=QUERY`,
+      `Transcript HTML: ${origin}/youtube/VIDEO_ID`,
+      `Transcript text: ${origin}/youtube/VIDEO_ID.txt`,
+      `Transcript JSON: ${origin}/youtube/VIDEO_ID.json`,
+      `Submit missing video: POST ${origin}/api/add with {"url":"YOUTUBE_URL"}`,
+      "",
+      "Always cite both the transcript page and its original source URL.",
+      "",
+    ].join("\n"),
+    { headers: { "Cache-Control": "public, max-age=3600" } },
+  );
+}

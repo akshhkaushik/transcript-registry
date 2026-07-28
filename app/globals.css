@@ -1,0 +1,112 @@
+:root {
+  color-scheme: light;
+}
+
+body {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 2rem 1rem;
+  color: #111;
+  background: #fff;
+  font: 16px/1.55 system-ui, sans-serif;
+}
+
+main {
+  width: min(72rem, 100%);
+  margin: 0 auto;
+}
+
+h1,
+h2 {
+  line-height: 1.15;
+}
+
+form {
+  display: flex;
+  gap: 0.5rem;
+  max-width: 48rem;
+}
+
+input {
+  min-width: 0;
+  flex: 1;
+  padding: 0.65rem;
+  border: 1px solid #555;
+  font: inherit;
+}
+
+button {
+  padding: 0.65rem 1rem;
+  border: 1px solid #111;
+  background: #fff;
+  color: #111;
+  font: inherit;
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+header,
+section,
+article {
+  margin-block: 1.5rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+dt {
+  font-weight: 600;
+}
+
+dd {
+  margin: 0;
+}
+
+.segment {
+  display: grid;
+  grid-template-columns: 5rem 1fr;
+  gap: 1rem;
+  margin: 0;
+  padding: 0.55rem 0;
+  border-top: 1px solid #ddd;
+}
+
+.muted {
+  color: #555;
+}
+
+code,
+pre {
+  font-family: ui-monospace, monospace;
+}
+
+@media (max-width: 36rem) {
+  body {
+    padding: 1rem;
+  }
+
+  form {
+    display: block;
+  }
+
+  input,
+  button {
+    width: 100%;
+    margin-bottom: 0.5rem;
+    box-sizing: border-box;
+  }
+
+  dl {
+    display: block;
+  }
+
+  dd {
+    margin-bottom: 0.5rem;
+  }
+}

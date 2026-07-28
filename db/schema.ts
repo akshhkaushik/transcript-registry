@@ -150,6 +150,32 @@ export const topicJobs = pgTable(
   ],
 );
 
+export const channelSearchJobs = pgTable(
+  "channel_search_jobs",
+  {
+    id: text("id").primaryKey(),
+    query: text("query").notNull(),
+    normalizedQuery: text("normalized_query").notNull(),
+    status: text("status").notNull().default("queued"),
+    resultLimit: integer("result_limit").notNull().default(8),
+    resultsJson: text("results_json").notNull().default("[]"),
+    attempts: integer("attempts").notNull().default(0),
+    workerId: text("worker_id"),
+    error: text("error"),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
+    updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
+    claimedAt: timestampColumn("claimed_at"),
+    completedAt: timestampColumn("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("channel_search_jobs_query_idx").on(table.normalizedQuery),
+    index("channel_search_jobs_status_created_idx").on(
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);
+
 export const submissionEvents = pgTable(
   "submission_events",
   {

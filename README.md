@@ -46,6 +46,11 @@ transcript URL.
 
 ## Add a complete channel
 
+If you do not know the channel URL, use **Find a new YouTube channel** on the
+home page or call `/api/channel-search?q=QUERY`. The owner-operated worker
+searches YouTube and publishes candidate channels on the returned status page.
+Choose one candidate to queue all of its public uploads.
+
 Paste a channel URL such as `https://www.youtube.com/@channel` on the home
 page. Registry creates one channel job and the local worker:
 
@@ -56,10 +61,12 @@ page. Registry creates one channel job and the local worker:
 4. processes up to four caption jobs concurrently;
 5. allows only one permissioned local ASR job at a time by default.
 
-The public channel page shows discovery batches, reported and discovered
-videos, queued/processing/completed/failed counts, measured seconds per video,
-elapsed time, progress, and ETA. Re-submitting a completed channel after six
-hours checks for new uploads without duplicating old records.
+The public channel page separates workflow completion from real transcript
+coverage. It shows discovered, queued, processing, completed and failed counts,
+groups failures by reason, and reports elapsed time and ETA. The home page
+lists fully covered channels separately from partial or processing channels.
+Re-submitting a completed channel after six hours checks for new uploads
+without duplicating old records.
 
 ## Run the website locally
 

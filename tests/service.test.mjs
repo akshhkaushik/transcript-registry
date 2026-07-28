@@ -36,6 +36,9 @@ test("renders only the minimal submission interface", async () => {
   assert.match(html, /action="\/api\/channels"/);
   assert.match(html, /Search videos and YouTube channels/);
   assert.match(html, /name="q"/);
+  assert.match(html, /action="\/api\/channel-search"/);
+  assert.match(html, /Channels with every transcript available/);
+  assert.match(html, /Processing or partially covered channels/);
   assert.match(html, /Add a complete YouTube channel/);
   assert.match(html, /Request transcript/);
   assert.doesNotMatch(
@@ -54,6 +57,52 @@ test("unified search returns transcript videos and matching channels", async () 
   assert.ok(Array.isArray(body.channels));
   assert.ok(
     body.channels.some((channel) => channel.name === "Action Physics"),
+  );
+});
+
+test("channel status distinguishes coverage from completed workflow", async () => {
+  const response = await request(
+    "/channels/dd8575c9-52e4-48b6-b639-98c202a84284.json",
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.progressPercent, 100);
+  assert.ok(body.transcriptCoveragePercent < 100);
+  assert.equal(body.fullyCovered, false);
+  assert.ok(
+    body.failureReasons.some((failure) =>
+      /No captions.*ASR.*not permitted/i.test(failure.reason),
+    ),
+  );
+});
+
+test("rejects an empty YouTube channel discovery query", async () => {
+  const response = await request("/api/channel-search", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({ q: "the" }),
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /specific YouTube channel/);
+});
+
+test("returns completed worker-discovered YouTube channel candidates", async () => {
+  const response = await request(
+    "/api/channel-search?q=Mayo%20Clinic",
+    { headers: { accept: "application/json" } },
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, "complete");
+  assert.ok(
+    body.results.some(
+      (channel) =>
+        channel.name === "Mayo Clinic" &&
+        /^https:\/\/www\.youtube\.com\/channel\//.test(channel.url),
+    ),
   );
 });
 

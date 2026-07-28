@@ -62,6 +62,13 @@ export async function GET(request: Request): Promise<Response> {
         processing: channel.processingVideos,
         percent: channel.progressPercent,
       },
+      transcriptCoverage: {
+        complete: channel.completedVideos,
+        total: channel.reportedVideoCount ?? channel.discoveredVideos,
+        percent: channel.transcriptCoveragePercent,
+        fullyCovered: channel.fullyCovered,
+      },
+      failureReasons: channel.failureReasons,
       page: `/channels/${channel.id}`,
       json: `/channels/${channel.id}.json`,
     })),
@@ -97,7 +104,15 @@ export async function GET(request: Request): Promise<Response> {
       lines.push(
         `Channel ${index + 1}: ${channel.channelName || channel.normalizedUrl}`,
         `Status: ${channel.status}`,
-        `Progress: ${channel.completedVideos + channel.failedVideos}/${channel.reportedVideoCount ?? channel.discoveredVideos}`,
+        `Transcript coverage: ${channel.completedVideos}/${channel.reportedVideoCount ?? channel.discoveredVideos} (${channel.transcriptCoveragePercent}%)`,
+        `Workflow completion: ${channel.progressPercent}%`,
+        ...(channel.failureReasons.length
+          ? [
+              `Failures: ${channel.failureReasons
+                .map((failure) => `${failure.count}× ${failure.reason}`)
+                .join("; ")}`,
+            ]
+          : []),
         `Channel page: ${url.origin}/channels/${channel.id}`,
         `Channel status: ${url.origin}/channels/${channel.id}.json`,
         `YouTube: ${channel.channelUrl ?? channel.normalizedUrl}`,

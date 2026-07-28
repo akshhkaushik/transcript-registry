@@ -48,6 +48,22 @@ test("strict nonsense search returns zero results", async () => {
   assert.match(await response.text(), /Results: 0/);
 });
 
+test("search uses whole words and honors its result limit", async () => {
+  const response = await request(
+    "/search.json?q=web%20development&limit=2&discover=0",
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.results.length, 2);
+  assert.ok(
+    body.results.every((result) =>
+      /\bweb\b/i.test(
+        `${result.title} ${result.snippet}`,
+      ),
+    ),
+  );
+});
+
 test("rejects a non-YouTube submission", async () => {
   const response = await request("/api/add", {
     method: "POST",

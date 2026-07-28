@@ -27,12 +27,14 @@ npm run dev
 Run the owner-operated background worker separately:
 
 ```sh
-pip install mlx-whisper
+python3 -m venv .venv
+.venv/bin/pip install -r worker/requirements.txt
 npm run worker
 ```
 
-`yt-dlp` and `ffmpeg` must be installed. Audio transcription is limited by
-default to Creative Commons videos or channel IDs you explicitly allow.
+Install `ffmpeg` and `whisper.cpp` separately if you want the permissioned
+audio fallback. MLX Whisper is optional. Captioned videos need only `yt-dlp`,
+which the requirements file installs.
 
 The launch corpus comes from the attributed CC-BY
 [YouTube-Commons dataset](https://huggingface.co/datasets/PleIAs/YouTube-Commons).

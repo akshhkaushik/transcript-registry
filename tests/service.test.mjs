@@ -33,11 +33,28 @@ test("renders only the minimal submission interface", async () => {
   const html = await response.text();
   assert.match(html, /Transcript Registry/);
   assert.match(html, /action="\/api\/add"/);
+  assert.match(html, /action="\/api\/channels"/);
+  assert.match(html, /Add a complete YouTube channel/);
   assert.match(html, /Add transcript/);
   assert.doesNotMatch(
     html,
     /codex-preview|react-loading-skeleton|Browse categories/i,
   );
+});
+
+test("rejects a video URL submitted as a channel", async () => {
+  const response = await request("/api/channels", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      url: "https://www.youtube.com/watch?v=Txqe_CAD43c",
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /YouTube channel URL/);
 });
 
 test("strict nonsense search returns zero results", async () => {

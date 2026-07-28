@@ -22,6 +22,13 @@
       "when": 1785238104167,
       "tag": "0002_transcript-search-vector",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785240338254,
+      "tag": "0003_crazy_argent",
+      "breakpoints": true
     }
   ]
 }

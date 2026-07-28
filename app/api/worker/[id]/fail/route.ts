@@ -13,11 +13,15 @@ export async function POST(
   const { id } = await context.params;
   const body = (await request.json().catch(() => ({}))) as {
     error?: unknown;
+    processingSeconds?: unknown;
   };
   try {
     await failJob(
       id,
       typeof body.error === "string" ? body.error : "Worker failed",
+      typeof body.processingSeconds === "number"
+        ? body.processingSeconds
+        : undefined,
     );
     return jsonResponse({ status: "recorded" });
   } catch (error) {

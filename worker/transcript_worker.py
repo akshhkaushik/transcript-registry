@@ -18,12 +18,14 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+from concurrent.futures import Future, ThreadPoolExecutor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -78,6 +80,14 @@ WORKER_ID = os.environ.get(
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 DISCOVERY_LANGUAGE = os.environ.get("DISCOVERY_LANGUAGE", "en")
 DISCOVERY_REGION = os.environ.get("DISCOVERY_REGION", "US")
+WORKER_CONCURRENCY = max(
+    1, min(int(os.environ.get("WORKER_CONCURRENCY", "4")), 8)
+)
+ASR_CONCURRENCY = max(1, min(int(os.environ.get("ASR_CONCURRENCY", "1")), 2))
+CHANNEL_BATCH_SIZE = max(
+    10, min(int(os.environ.get("CHANNEL_BATCH_SIZE", "50")), 100)
+)
+ASR_SEMAPHORE = threading.BoundedSemaphore(ASR_CONCURRENCY)
 
 TIMESTAMP = re.compile(
     r"(?P<start>\d{2}:\d{2}(?::\d{2})?[\.,]\d{3})\s+-->\s+"
@@ -116,22 +126,52 @@ def request_json(
     path: str, payload: dict[str, Any], timeout: int = 120
 ) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        f"{REGISTRY_URL}{path}",
-        data=body,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {WORKER_TOKEN}",
-            "Content-Type": "application/json",
-            "User-Agent": "transcript-registry-worker/1.0",
-        },
-    )
+    attempts = 1 if path.endswith("/claim") else 3
+    for attempt in range(attempts):
+        request = urllib.request.Request(
+            f"{REGISTRY_URL}{path}",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {WORKER_TOKEN}",
+                "Content-Type": "application/json",
+                "User-Agent": "transcript-registry-worker/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", "replace")
+            retryable = error.code == 429 or error.code >= 500
+            if not retryable or attempt + 1 >= attempts:
+                raise RuntimeError(
+                    f"Registry returned HTTP {error.code}: {detail}"
+                ) from error
+        except (urllib.error.URLError, TimeoutError) as error:
+            if attempt + 1 >= attempts:
+                raise RuntimeError(
+                    f"Registry request failed after {attempts} attempt(s): {error}"
+                ) from error
+        time.sleep(2**attempt)
+    raise RuntimeError("Registry request failed")
+
+
+def report_failure(path: str, payload: dict[str, Any], label: str) -> None:
+    """Report a failed job without allowing a second network error to kill the worker."""
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", "replace")
-        raise RuntimeError(f"Registry returned HTTP {error.code}: {detail}") from error
+        request_json(path, payload)
+    except Exception as error:  # noqa: BLE001
+        print(f"could not report {label} failure: {error}", flush=True)
+
+
+def claim_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Treat a transient claim error as an idle poll, not a worker crash."""
+    try:
+        return request_json(path, payload)
+    except Exception as error:  # noqa: BLE001
+        print(f"claim request failed for {path}: {error}", flush=True)
+        return {}
 
 
 def run(command: list[str], cwd: Path, timeout: int = 3600) -> str:
@@ -415,6 +455,7 @@ def extract_topics(value: str) -> list[str]:
 
 
 def process(job: dict[str, Any]) -> None:
+    started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="transcript-worker-") as directory:
         cwd = Path(directory)
         info = metadata(job["sourceUrl"], cwd)
@@ -422,10 +463,30 @@ def process(job: dict[str, Any]) -> None:
         if captions:
             segments, source = captions
         else:
-            segments, source = transcribe_audio(job["sourceUrl"], cwd, info)
+            with ASR_SEMAPHORE:
+                segments, source = transcribe_audio(job["sourceUrl"], cwd, info)
         transcript = build_transcript(job, info, segments, source)
+        transcript["processingSeconds"] = max(
+            1, round(time.monotonic() - started)
+        )
         request_json(
             f"/api/worker/{job['id']}/complete", transcript, timeout=300
+        )
+
+
+def handle_video(job: dict[str, Any]) -> None:
+    started = time.monotonic()
+    try:
+        process(job)
+        print(f"completed video {job['providerId']}", flush=True)
+    except Exception as error:  # noqa: BLE001
+        elapsed = max(1, round(time.monotonic() - started))
+        message = str(error)[:1000]
+        print(f"failed video {job['providerId']}: {message}", flush=True)
+        report_failure(
+            f"/api/worker/{job['id']}/fail",
+            {"error": message, "processingSeconds": elapsed},
+            f"video {job['providerId']}",
         )
 
 
@@ -513,14 +574,336 @@ def process_topic(job: dict[str, Any]) -> None:
     )
 
 
+def youtube_api_json(resource: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    query = urllib.parse.urlencode({**parameters, "key": YOUTUBE_API_KEY})
+    request = urllib.request.Request(
+        f"https://www.googleapis.com/youtube/v3/{resource}?{query}",
+        headers={"User-Agent": "transcript-registry-worker/2.0"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def channel_api_filter(url: str) -> dict[str, str] | None:
+    parts = [part for part in urllib.parse.urlparse(url).path.split("/") if part]
+    if not parts:
+        return None
+    if parts[0].startswith("@"):
+        return {"forHandle": parts[0]}
+    if len(parts) > 1 and parts[0] == "channel":
+        return {"id": parts[1]}
+    if len(parts) > 1 and parts[0] == "user":
+        return {"forUsername": parts[1]}
+    return None
+
+
+def send_channel_batch(
+    job: dict[str, Any],
+    videos: list[dict[str, str]],
+    metadata_payload: dict[str, Any],
+) -> None:
+    if not videos:
+        return
+    request_json(
+        f"/api/worker/channels/{job['id']}/batch",
+        {**metadata_payload, "videos": videos},
+        timeout=180,
+    )
+    print(
+        f"channel {job['id']} discovered batch of {len(videos)}",
+        flush=True,
+    )
+
+
+def send_channel_metadata(
+    job: dict[str, Any],
+    metadata_payload: dict[str, Any],
+) -> None:
+    request_json(
+        f"/api/worker/channels/{job['id']}/batch",
+        {**metadata_payload, "videos": []},
+        timeout=180,
+    )
+
+
+def discover_channel_with_api(job: dict[str, Any]) -> bool:
+    if not YOUTUBE_API_KEY:
+        return False
+    channel_filter = channel_api_filter(str(job["normalizedUrl"]))
+    if not channel_filter:
+        return False
+    payload = youtube_api_json(
+        "channels",
+        {
+            "part": "snippet,contentDetails,statistics",
+            **channel_filter,
+        },
+    )
+    items = payload.get("items") or []
+    if not items:
+        raise RuntimeError("YouTube API could not resolve this channel")
+    channel = items[0]
+    channel_id = str(channel.get("id") or "")
+    snippet = channel.get("snippet") or {}
+    details = channel.get("contentDetails") or {}
+    statistics = channel.get("statistics") or {}
+    uploads = str(
+        (details.get("relatedPlaylists") or {}).get("uploads") or ""
+    )
+    if not uploads:
+        raise RuntimeError("YouTube API did not return the uploads playlist")
+    metadata_payload = {
+        "channelId": channel_id,
+        "channelName": str(snippet.get("title") or channel_id),
+        "channelUrl": f"https://www.youtube.com/channel/{channel_id}",
+        "reportedVideoCount": int(statistics.get("videoCount") or 0),
+    }
+    send_channel_metadata(job, metadata_payload)
+    batch_size = max(
+        10, min(int(job.get("batchSize") or CHANNEL_BATCH_SIZE), 100)
+    )
+    batch: list[dict[str, str]] = []
+    page_token = ""
+    while True:
+        page = youtube_api_json(
+            "playlistItems",
+            {
+                "part": "snippet,contentDetails",
+                "playlistId": uploads,
+                "maxResults": 50,
+                **({"pageToken": page_token} if page_token else {}),
+            },
+        )
+        for item in page.get("items") or []:
+            content = item.get("contentDetails") or {}
+            item_snippet = item.get("snippet") or {}
+            resource = item_snippet.get("resourceId") or {}
+            video_id = str(
+                content.get("videoId") or resource.get("videoId") or ""
+            )
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                continue
+            batch.append(
+                {
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                    "title": str(item_snippet.get("title") or video_id),
+                }
+            )
+            if len(batch) >= batch_size:
+                send_channel_batch(job, batch, metadata_payload)
+                batch = []
+        page_token = str(page.get("nextPageToken") or "")
+        if not page_token:
+            break
+    send_channel_batch(job, batch, metadata_payload)
+    request_json(f"/api/worker/channels/{job['id']}/complete", {})
+    return True
+
+
+def channel_targets(url: str) -> list[str]:
+    base = url.rstrip("/")
+    return [f"{base}/videos", f"{base}/shorts", f"{base}/streams"]
+
+
+def discover_channel_with_ytdlp(job: dict[str, Any]) -> None:
+    batch_size = max(
+        10, min(int(job.get("batchSize") or CHANNEL_BATCH_SIZE), 100)
+    )
+    batch: list[dict[str, str]] = []
+    seen: set[str] = set()
+    metadata_payload: dict[str, Any] = {}
+    errors: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="channel-discovery-") as directory:
+        cwd = Path(directory)
+        try:
+            preview = json.loads(
+                run(
+                    [
+                        YT_DLP_BINARY,
+                        "--dump-single-json",
+                        "--flat-playlist",
+                        "--skip-download",
+                        "--no-warnings",
+                        "--playlist-end",
+                        "1",
+                        channel_targets(str(job["normalizedUrl"]))[0],
+                    ],
+                    cwd,
+                    timeout=300,
+                )
+            )
+            channel_id = str(preview.get("channel_id") or preview.get("id") or "")
+            channel_name = str(
+                preview.get("channel") or preview.get("uploader") or ""
+            )
+            if channel_id:
+                metadata_payload["channelId"] = channel_id
+                metadata_payload["channelUrl"] = (
+                    f"https://www.youtube.com/channel/{channel_id}"
+                )
+            if channel_name:
+                metadata_payload["channelName"] = channel_name
+            send_channel_metadata(job, metadata_payload)
+        except (RuntimeError, json.JSONDecodeError):
+            pass
+        for target in channel_targets(str(job["normalizedUrl"])):
+            with tempfile.TemporaryFile(mode="w+") as errors_file:
+                command = [
+                    YT_DLP_BINARY,
+                    "--flat-playlist",
+                    "--lazy-playlist",
+                    "--dump-json",
+                    "--skip-download",
+                    "--no-warnings",
+                    "--yes-playlist",
+                    target,
+                ]
+                process = subprocess.Popen(
+                    command,
+                    cwd=cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=errors_file,
+                    text=True,
+                )
+                assert process.stdout is not None
+                for line in process.stdout:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    video_id = str(item.get("id") or "")
+                    if (
+                        not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id)
+                        or video_id in seen
+                    ):
+                        continue
+                    seen.add(video_id)
+                    channel_id = str(item.get("channel_id") or "")
+                    channel_name = str(
+                        item.get("channel") or item.get("uploader") or ""
+                    )
+                    if channel_id:
+                        metadata_payload["channelId"] = channel_id
+                        metadata_payload["channelUrl"] = (
+                            f"https://www.youtube.com/channel/{channel_id}"
+                        )
+                    if channel_name:
+                        metadata_payload["channelName"] = channel_name
+                    playlist_count = item.get("playlist_count")
+                    if isinstance(playlist_count, int):
+                        metadata_payload["reportedVideoCount"] = max(
+                            int(metadata_payload.get("reportedVideoCount") or 0),
+                            playlist_count,
+                        )
+                    batch.append(
+                        {
+                            "url": f"https://www.youtube.com/watch?v={video_id}",
+                            "title": str(item.get("title") or video_id),
+                        }
+                    )
+                    if len(batch) >= batch_size:
+                        send_channel_batch(job, batch, metadata_payload)
+                        batch = []
+                return_code = process.wait(timeout=60)
+                if return_code:
+                    errors_file.seek(0)
+                    errors.append(errors_file.read()[-1000:])
+    send_channel_batch(job, batch, metadata_payload)
+    if not seen and errors:
+        raise RuntimeError(errors[-1] or "yt-dlp found no public channel videos")
+    send_channel_metadata(
+        job,
+        {**metadata_payload, "reportedVideoCount": len(seen)},
+    )
+    request_json(f"/api/worker/channels/{job['id']}/complete", {})
+
+
+def process_channel(job: dict[str, Any]) -> None:
+    if YOUTUBE_API_KEY:
+        try:
+            if discover_channel_with_api(job):
+                return
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            KeyError,
+            ValueError,
+            json.JSONDecodeError,
+            RuntimeError,
+        ) as error:
+            print(
+                f"YouTube channel API failed; using yt-dlp: {error}",
+                flush=True,
+            )
+    discover_channel_with_ytdlp(job)
+
+
+def handle_channel(job: dict[str, Any]) -> None:
+    try:
+        process_channel(job)
+        print(f"completed channel discovery {job['normalizedUrl']}", flush=True)
+    except Exception as error:  # noqa: BLE001
+        message = str(error)[:1000]
+        print(f"failed channel {job['normalizedUrl']}: {message}", flush=True)
+        report_failure(
+            f"/api/worker/channels/{job['id']}/fail",
+            {"error": message},
+            f"channel {job['id']}",
+        )
+
+
+def handle_topic(job: dict[str, Any]) -> None:
+    try:
+        process_topic(job)
+        print(f"completed topic {job['query']}", flush=True)
+    except Exception as error:  # noqa: BLE001
+        message = str(error)[:1000]
+        print(f"failed topic {job['query']}: {message}", flush=True)
+        report_failure(
+            f"/api/worker/topics/{job['id']}/fail",
+            {"error": message},
+            f"topic {job['id']}",
+        )
+
+
+def process_once() -> None:
+    channel = request_json(
+        "/api/worker/channels/claim", {"workerId": WORKER_ID}
+    ).get("job")
+    if channel:
+        handle_channel(channel)
+        return
+    response = request_json(
+        "/api/worker/claim",
+        {"workerId": WORKER_ID, "limit": 1},
+    )
+    jobs = response.get("jobs") or (
+        [response["job"]] if response.get("job") else []
+    )
+    if jobs:
+        handle_video(jobs[0])
+        return
+    topic = request_json(
+        "/api/worker/topics/claim", {"workerId": WORKER_ID}
+    ).get("job")
+    if topic:
+        handle_topic(topic)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Process at most one transcript or topic-discovery job",
+        help="Process at most one channel, transcript, or topic job",
     )
     parser.add_argument("--check", action="store_true", help="Validate dependencies")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=WORKER_CONCURRENCY,
+        help="Maximum concurrent video jobs (default: WORKER_CONCURRENCY or 4)",
+    )
     args = parser.parse_args()
 
     if not REGISTRY_URL or not WORKER_TOKEN:
@@ -528,46 +911,103 @@ def main() -> int:
     if not shutil.which(YT_DLP_BINARY):
         raise SystemExit(f"yt-dlp not found: {YT_DLP_BINARY}")
     if args.check:
-        print("worker ready")
+        print(
+            "worker ready "
+            f"(video concurrency={max(1, min(args.concurrency, 8))}, "
+            f"ASR concurrency={ASR_CONCURRENCY}, "
+            f"channel batch={CHANNEL_BATCH_SIZE})"
+        )
+        return 0
+    if args.once:
+        process_once()
         return 0
 
-    while True:
-        response = request_json("/api/worker/claim", {"workerId": WORKER_ID})
-        job = response.get("job")
-        if job:
-            try:
-                process(job)
-                print(f"completed video {job['providerId']}", flush=True)
-            except Exception as error:  # noqa: BLE001
-                message = str(error)[:1000]
-                print(f"failed video {job['providerId']}: {message}", flush=True)
-                request_json(f"/api/worker/{job['id']}/fail", {"error": message})
-            if args.once:
-                return 0
-            continue
+    concurrency = max(1, min(args.concurrency, 8))
+    video_futures: set[Future[None]] = set()
+    discovery_future: Future[None] | None = None
+    next_channel_poll = 0.0
+    with (
+        ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="transcript",
+        ) as video_executor,
+        ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="discovery",
+        ) as discovery_executor,
+    ):
+        while True:
+            progressed = False
+            finished = {future for future in video_futures if future.done()}
+            for future in finished:
+                try:
+                    future.result()
+                except Exception as error:  # noqa: BLE001
+                    print(f"video task crashed: {error}", flush=True)
+            if finished:
+                video_futures.difference_update(finished)
+                progressed = True
+            if discovery_future and discovery_future.done():
+                try:
+                    discovery_future.result()
+                except Exception as error:  # noqa: BLE001
+                    print(f"discovery task crashed: {error}", flush=True)
+                discovery_future = None
+                progressed = True
 
-        topic_response = request_json(
-            "/api/worker/topics/claim", {"workerId": WORKER_ID}
-        )
-        topic_job = topic_response.get("job")
-        if topic_job:
-            try:
-                process_topic(topic_job)
-                print(f"completed topic {topic_job['query']}", flush=True)
-            except Exception as error:  # noqa: BLE001
-                message = str(error)[:1000]
-                print(f"failed topic {topic_job['query']}: {message}", flush=True)
-                request_json(
-                    f"/api/worker/topics/{topic_job['id']}/fail",
-                    {"error": message},
+            now = time.monotonic()
+            if discovery_future is None and now >= next_channel_poll:
+                channel = claim_json(
+                    "/api/worker/channels/claim",
+                    {"workerId": WORKER_ID},
+                ).get("job")
+                if channel:
+                    discovery_future = discovery_executor.submit(
+                        handle_channel,
+                        channel,
+                    )
+                    progressed = True
+                else:
+                    next_channel_poll = now + 5
+
+            open_slots = concurrency - len(video_futures)
+            claimed_video = False
+            if open_slots > 0:
+                response = claim_json(
+                    "/api/worker/claim",
+                    {"workerId": WORKER_ID, "limit": open_slots},
                 )
-            if args.once:
-                return 0
-            continue
+                claimed = response.get("jobs") or (
+                    [response["job"]] if response.get("job") else []
+                )
+                for job in claimed:
+                    video_futures.add(video_executor.submit(handle_video, job))
+                if claimed:
+                    claimed_video = True
+                    progressed = True
 
-        if args.once:
-            return 0
-        time.sleep(POLL_SECONDS)
+            if (
+                discovery_future is None
+                and not video_futures
+                and not claimed_video
+            ):
+                topic = claim_json(
+                    "/api/worker/topics/claim",
+                    {"workerId": WORKER_ID},
+                ).get("job")
+                if topic:
+                    discovery_future = discovery_executor.submit(
+                        handle_topic,
+                        topic,
+                    )
+                    progressed = True
+
+            if not progressed:
+                time.sleep(
+                    0.75
+                    if video_futures or discovery_future
+                    else POLL_SECONDS
+                )
 
 
 if __name__ == "__main__":

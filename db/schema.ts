@@ -44,6 +44,35 @@ export const transcripts = pgTable(
   ],
 );
 
+export const channelJobs = pgTable(
+  "channel_jobs",
+  {
+    id: text("id").primaryKey(),
+    inputUrl: text("input_url").notNull(),
+    normalizedUrl: text("normalized_url").notNull(),
+    channelId: text("channel_id"),
+    channelName: text("channel_name").notNull().default(""),
+    channelUrl: text("channel_url"),
+    status: text("status").notNull().default("queued"),
+    reportedVideoCount: integer("reported_video_count"),
+    batchSize: integer("batch_size").notNull().default(50),
+    concurrency: integer("concurrency").notNull().default(4),
+    batchesReceived: integer("batches_received").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    workerId: text("worker_id"),
+    error: text("error"),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
+    updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
+    claimedAt: timestampColumn("claimed_at"),
+    discoveryCompletedAt: timestampColumn("discovery_completed_at"),
+    completedAt: timestampColumn("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("channel_jobs_normalized_url_idx").on(table.normalizedUrl),
+    index("channel_jobs_status_created_idx").on(table.status, table.createdAt),
+  ],
+);
+
 export const jobs = pgTable(
   "jobs",
   {
@@ -55,6 +84,7 @@ export const jobs = pgTable(
     attempts: integer("attempts").notNull().default(0),
     workerId: text("worker_id"),
     error: text("error"),
+    processingSeconds: integer("processing_seconds"),
     createdAt: timestampColumn("created_at").notNull().defaultNow(),
     updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
     claimedAt: timestampColumn("claimed_at"),
@@ -63,6 +93,35 @@ export const jobs = pgTable(
   (table) => [
     uniqueIndex("jobs_provider_video_idx").on(table.provider, table.providerId),
     index("jobs_status_created_idx").on(table.status, table.createdAt),
+  ],
+);
+
+export const channelVideos = pgTable(
+  "channel_videos",
+  {
+    id: text("id").primaryKey(),
+    channelJobId: text("channel_job_id")
+      .notNull()
+      .references(() => channelJobs.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull().default("youtube"),
+    providerId: text("provider_id").notNull(),
+    sourceUrl: text("source_url").notNull(),
+    title: text("title").notNull().default(""),
+    jobId: text("job_id").references(() => jobs.id, { onDelete: "set null" }),
+    status: text("status").notNull().default("queued"),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
+    updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("channel_videos_channel_video_idx").on(
+      table.channelJobId,
+      table.providerId,
+    ),
+    index("channel_videos_channel_status_idx").on(
+      table.channelJobId,
+      table.status,
+    ),
+    index("channel_videos_job_idx").on(table.jobId),
   ],
 );
 

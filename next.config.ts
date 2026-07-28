@@ -19,6 +19,10 @@ const nextConfig: NextConfig = {
         source: "/topics/:id.json",
         destination: "/api/topics/:id",
       },
+      {
+        source: "/channels/:id.json",
+        destination: "/api/channels/:id",
+      },
     ];
   },
 };

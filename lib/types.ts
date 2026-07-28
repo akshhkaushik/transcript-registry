@@ -43,10 +43,46 @@ export type IngestionJob = {
   attempts: number;
   workerId: string | null;
   error: string | null;
+  processingSeconds: number | null;
   createdAt: string;
   updatedAt: string;
   claimedAt: string | null;
   completedAt: string | null;
+};
+
+export type ChannelJob = {
+  id: string;
+  inputUrl: string;
+  normalizedUrl: string;
+  channelId: string | null;
+  channelName: string;
+  channelUrl: string | null;
+  status: "queued" | "discovering" | "processing" | "complete" | "failed";
+  reportedVideoCount: number | null;
+  batchSize: number;
+  concurrency: number;
+  batchesReceived: number;
+  attempts: number;
+  workerId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  claimedAt: string | null;
+  discoveryCompletedAt: string | null;
+  completedAt: string | null;
+};
+
+export type ChannelProgress = ChannelJob & {
+  discoveredVideos: number;
+  completedVideos: number;
+  queuedVideos: number;
+  processingVideos: number;
+  failedVideos: number;
+  elapsedSeconds: number;
+  averageProcessingSeconds: number | null;
+  observedVideosPerMinute: number | null;
+  estimatedSecondsRemaining: number | null;
+  progressPercent: number;
 };
 
 export type TopicJob = {

@@ -1,5 +1,5 @@
-import { claimJobs } from "../../../../db/store";
-import { jsonResponse, workerAuthorized } from "../../../../lib/http";
+import { claimChannelJob } from "../../../../../db/store";
+import { jsonResponse, workerAuthorized } from "../../../../../lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -9,17 +9,13 @@ export async function POST(request: Request): Promise<Response> {
   }
   const body = (await request.json().catch(() => ({}))) as {
     workerId?: unknown;
-    limit?: unknown;
   };
   const workerId =
     typeof body.workerId === "string" && body.workerId.trim()
       ? body.workerId.trim().slice(0, 200)
       : "worker";
-  const limit =
-    typeof body.limit === "number" ? Math.max(1, Math.min(body.limit, 10)) : 1;
-  const jobs = await claimJobs(workerId, limit);
   return jsonResponse(
-    { job: jobs[0] ?? null, jobs },
+    { job: await claimChannelJob(workerId) },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

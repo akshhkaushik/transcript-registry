@@ -14,7 +14,8 @@ returns only real matches; unrelated queries return zero results.
 
 ## Run it
 
-Copy `.env.example` to `.env`, fill in the public site address and secret, then:
+Copy `.env.example` to `.env.worker` and fill in the public site address and
+worker secret. Start the website locally with:
 
 ```sh
 npm install

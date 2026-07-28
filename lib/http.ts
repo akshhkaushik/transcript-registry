@@ -1,5 +1,4 @@
 import type { TranscriptRecord } from "./types";
-import { runtimeEnvironment } from "../db/runtime";
 
 export const PUBLIC_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -32,8 +31,7 @@ export function textResponse(
 }
 
 export async function workerAuthorized(request: Request): Promise<boolean> {
-  const expected =
-    runtimeEnvironment().WORKER_TOKEN ?? process.env.WORKER_TOKEN;
+  const expected = process.env.WORKER_TOKEN;
   const supplied = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
   if (!expected || !supplied) return false;
   const [left, right] = await Promise.all([digest(expected), digest(supplied)]);
@@ -45,10 +43,7 @@ export async function clientHash(request: Request): Promise<string> {
     request.headers.get("cf-connecting-ip") ??
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
     "unknown";
-  const salt =
-    runtimeEnvironment().RATE_LIMIT_SALT ??
-    process.env.RATE_LIMIT_SALT ??
-    "transcript-registry";
+  const salt = process.env.RATE_LIMIT_SALT ?? "transcript-registry";
   return digest(`${salt}:${ip}`);
 }
 

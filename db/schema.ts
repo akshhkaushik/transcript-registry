@@ -1,7 +1,16 @@
-import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 
-export const transcripts = sqliteTable(
+const timestampColumn = (name: string) =>
+  timestamp(name, { withTimezone: true, mode: "string" });
+
+export const transcripts = pgTable(
   "transcripts",
   {
     id: text("id").primaryKey(),
@@ -23,8 +32,8 @@ export const transcripts = sqliteTable(
     segmentsJson: text("segments_json").notNull(),
     wordCount: integer("word_count").notNull(),
     checksum: text("checksum").notNull(),
-    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
+    updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("transcripts_provider_video_idx").on(
@@ -35,7 +44,7 @@ export const transcripts = sqliteTable(
   ],
 );
 
-export const jobs = sqliteTable(
+export const jobs = pgTable(
   "jobs",
   {
     id: text("id").primaryKey(),
@@ -46,10 +55,10 @@ export const jobs = sqliteTable(
     attempts: integer("attempts").notNull().default(0),
     workerId: text("worker_id"),
     error: text("error"),
-    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    claimedAt: text("claimed_at"),
-    completedAt: text("completed_at"),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
+    updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
+    claimedAt: timestampColumn("claimed_at"),
+    completedAt: timestampColumn("completed_at"),
   },
   (table) => [
     uniqueIndex("jobs_provider_video_idx").on(table.provider, table.providerId),
@@ -57,12 +66,17 @@ export const jobs = sqliteTable(
   ],
 );
 
-export const submissionEvents = sqliteTable(
+export const submissionEvents = pgTable(
   "submission_events",
   {
     id: text("id").primaryKey(),
     clientHash: text("client_hash").notNull(),
-    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
   },
-  (table) => [index("submission_events_client_time_idx").on(table.clientHash, table.createdAt)],
+  (table) => [
+    index("submission_events_client_time_idx").on(
+      table.clientHash,
+      table.createdAt,
+    ),
+  ],
 );

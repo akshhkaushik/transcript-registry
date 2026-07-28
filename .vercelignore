@@ -1,0 +1,8 @@
+.agents
+.models
+.venv
+.env.worker
+skills-lock.json
+vercel-proxy
+work
+worker/__pycache__

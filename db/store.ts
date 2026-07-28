@@ -1,48 +1,24 @@
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gte,
+  lt,
+  sql,
+} from "drizzle-orm";
 import type {
   IngestionJob,
   TranscriptRecord,
   TranscriptSegment,
 } from "../lib/types";
-import { ensureDatabase, rawDb } from "./runtime";
+import { getDb } from "./index";
+import { jobs, submissionEvents, transcripts } from "./schema";
+import { ensureDatabase } from "./runtime";
 
-type TranscriptRow = {
-  id: string;
-  provider: "youtube";
-  provider_id: string;
-  source_url: string;
-  title: string;
-  channel: string;
-  channel_url: string | null;
-  description: string;
-  published_at: string | null;
-  duration_seconds: number | null;
-  language: string;
-  transcript_source: TranscriptRecord["transcriptSource"];
-  license: string;
-  attribution: string;
-  topics_json: string;
-  transcript_text: string;
-  segments_json: string;
-  word_count: number;
-  checksum: string;
-  created_at: string;
-  updated_at: string;
-};
-
-type JobRow = {
-  id: string;
-  provider: "youtube";
-  provider_id: string;
-  source_url: string;
-  status: IngestionJob["status"];
-  attempts: number;
-  worker_id: string | null;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-  claimed_at: string | null;
-  completed_at: string | null;
-};
+type TranscriptRow = typeof transcripts.$inferSelect;
+type JobRow = typeof jobs.$inferSelect;
 
 const STOP_WORDS = new Set([
   "a",
@@ -79,12 +55,16 @@ export async function getTranscript(
   providerId: string,
 ): Promise<TranscriptRecord | null> {
   await ensureDatabase();
-  const row = await rawDb()
-    .prepare(
-      "SELECT * FROM transcripts WHERE provider = ? AND provider_id = ? LIMIT 1",
+  const [row] = await getDb()
+    .select()
+    .from(transcripts)
+    .where(
+      and(
+        eq(transcripts.provider, provider),
+        eq(transcripts.providerId, providerId),
+      ),
     )
-    .bind(provider, providerId)
-    .first<TranscriptRow>();
+    .limit(1);
   return row ? mapTranscript(row) : null;
 }
 
@@ -95,63 +75,61 @@ export async function saveTranscript(
 }
 
 export async function saveTranscripts(
-  transcripts: TranscriptRecord[],
+  values: TranscriptRecord[],
 ): Promise<void> {
   await ensureDatabase();
-  if (!transcripts.length) return;
-  const db = rawDb();
-  const statements = transcripts.map((transcript) => {
-    const clean = validateTranscript(transcript);
-    return db
-      .prepare(`
-      INSERT INTO transcripts (
-        id, provider, provider_id, source_url, title, channel, channel_url,
-        description, published_at, duration_seconds, language,
-        transcript_source, license, attribution, topics_json,
-        transcript_text, segments_json, word_count, checksum, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(provider, provider_id) DO UPDATE SET
-        source_url = excluded.source_url,
-        title = excluded.title,
-        channel = excluded.channel,
-        channel_url = excluded.channel_url,
-        description = excluded.description,
-        published_at = excluded.published_at,
-        duration_seconds = excluded.duration_seconds,
-        language = excluded.language,
-        transcript_source = excluded.transcript_source,
-        license = excluded.license,
-        attribution = excluded.attribution,
-        topics_json = excluded.topics_json,
-        transcript_text = excluded.transcript_text,
-        segments_json = excluded.segments_json,
-        word_count = excluded.word_count,
-        checksum = excluded.checksum,
-        updated_at = CURRENT_TIMESTAMP
-    `)
-      .bind(
-        clean.id,
-        clean.provider,
-        clean.providerId,
-        clean.sourceUrl,
-        clean.title,
-        clean.channel,
-        clean.channelUrl,
-        clean.description,
-        clean.publishedAt,
-        clean.durationSeconds,
-        clean.language,
-        clean.transcriptSource,
-        clean.license,
-        clean.attribution,
-        JSON.stringify(clean.topics),
-        clean.transcriptText,
-        JSON.stringify(clean.segments),
-        clean.wordCount,
-        clean.checksum,
-      );
+  if (!values.length) return;
+
+  const rows = values.map((value) => {
+    const clean = validateTranscript(value);
+    return {
+      id: clean.id,
+      provider: clean.provider,
+      providerId: clean.providerId,
+      sourceUrl: clean.sourceUrl,
+      title: clean.title,
+      channel: clean.channel,
+      channelUrl: clean.channelUrl,
+      description: clean.description,
+      publishedAt: clean.publishedAt,
+      durationSeconds: clean.durationSeconds,
+      language: clean.language,
+      transcriptSource: clean.transcriptSource,
+      license: clean.license,
+      attribution: clean.attribution,
+      topicsJson: JSON.stringify(clean.topics),
+      transcriptText: clean.transcriptText,
+      segmentsJson: JSON.stringify(clean.segments),
+      wordCount: clean.wordCount,
+      checksum: clean.checksum,
+    };
   });
-  await db.batch(statements);
+
+  await getDb()
+    .insert(transcripts)
+    .values(rows)
+    .onConflictDoUpdate({
+      target: [transcripts.provider, transcripts.providerId],
+      set: {
+        sourceUrl: sql`excluded.source_url`,
+        title: sql`excluded.title`,
+        channel: sql`excluded.channel`,
+        channelUrl: sql`excluded.channel_url`,
+        description: sql`excluded.description`,
+        publishedAt: sql`excluded.published_at`,
+        durationSeconds: sql`excluded.duration_seconds`,
+        language: sql`excluded.language`,
+        transcriptSource: sql`excluded.transcript_source`,
+        license: sql`excluded.license`,
+        attribution: sql`excluded.attribution`,
+        topicsJson: sql`excluded.topics_json`,
+        transcriptText: sql`excluded.transcript_text`,
+        segmentsJson: sql`excluded.segments_json`,
+        wordCount: sql`excluded.word_count`,
+        checksum: sql`excluded.checksum`,
+        updatedAt: sql`CURRENT_TIMESTAMP`,
+      },
+    });
 }
 
 export async function createOrFindJob(input: {
@@ -160,65 +138,87 @@ export async function createOrFindJob(input: {
   sourceUrl: string;
 }): Promise<{ job: IngestionJob; created: boolean }> {
   await ensureDatabase();
-  const existing = await rawDb()
-    .prepare(
-      "SELECT * FROM jobs WHERE provider = ? AND provider_id = ? LIMIT 1",
-    )
-    .bind(input.provider, input.providerId)
-    .first<JobRow>();
-  if (existing) return { job: mapJob(existing), created: false };
-
   const id = crypto.randomUUID();
-  await rawDb()
-    .prepare(
-      "INSERT INTO jobs (id, provider, provider_id, source_url) VALUES (?, ?, ?, ?)",
+  const [created] = await getDb()
+    .insert(jobs)
+    .values({
+      id,
+      provider: input.provider,
+      providerId: input.providerId,
+      sourceUrl: input.sourceUrl,
+    })
+    .onConflictDoNothing({
+      target: [jobs.provider, jobs.providerId],
+    })
+    .returning();
+
+  if (created) return { job: mapJob(created), created: true };
+
+  const [existing] = await getDb()
+    .select()
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.provider, input.provider),
+        eq(jobs.providerId, input.providerId),
+      ),
     )
-    .bind(id, input.provider, input.providerId, input.sourceUrl)
-    .run();
-  const job = await getJob(id);
-  if (!job) throw new Error("Job was not created");
-  return { job, created: true };
+    .limit(1);
+  if (!existing) throw new Error("Job was not created");
+  return { job: mapJob(existing), created: false };
 }
 
 export async function getJob(id: string): Promise<IngestionJob | null> {
   await ensureDatabase();
-  const row = await rawDb()
-    .prepare("SELECT * FROM jobs WHERE id = ? LIMIT 1")
-    .bind(id)
-    .first<JobRow>();
+  const [row] = await getDb()
+    .select()
+    .from(jobs)
+    .where(eq(jobs.id, id))
+    .limit(1);
   return row ? mapJob(row) : null;
 }
 
 export async function claimJob(workerId: string): Promise<IngestionJob | null> {
   await ensureDatabase();
-  const db = rawDb();
-  await db
-    .prepare(`
-      UPDATE jobs
-      SET status = 'queued', worker_id = NULL, claimed_at = NULL, updated_at = CURRENT_TIMESTAMP
-      WHERE status = 'processing'
-        AND claimed_at < datetime('now', '-45 minutes')
-        AND attempts < 3
-    `)
-    .run();
-  const candidate = await db
-    .prepare(
-      "SELECT id FROM jobs WHERE status = 'queued' AND attempts < 3 ORDER BY created_at ASC LIMIT 1",
-    )
-    .first<{ id: string }>();
+  const database = getDb();
+  const staleBefore = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+
+  await database
+    .update(jobs)
+    .set({
+      status: "queued",
+      workerId: null,
+      claimedAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(jobs.status, "processing"),
+        lt(jobs.claimedAt, staleBefore),
+        lt(jobs.attempts, 3),
+      ),
+    );
+
+  const [candidate] = await database
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(and(eq(jobs.status, "queued"), lt(jobs.attempts, 3)))
+    .orderBy(asc(jobs.createdAt))
+    .limit(1);
   if (!candidate) return null;
 
-  const result = await db
-    .prepare(`
-      UPDATE jobs
-      SET status = 'processing', worker_id = ?, attempts = attempts + 1,
-          claimed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status = 'queued'
-    `)
-    .bind(workerId, candidate.id)
-    .run();
-  if (!result.meta.changes) return null;
-  return getJob(candidate.id);
+  const [claimed] = await database
+    .update(jobs)
+    .set({
+      status: "processing",
+      workerId,
+      attempts: sql`${jobs.attempts} + 1`,
+      claimedAt: sql`CURRENT_TIMESTAMP`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(and(eq(jobs.id, candidate.id), eq(jobs.status, "queued")))
+    .returning();
+  return claimed ? mapJob(claimed) : null;
 }
 
 export async function completeJob(
@@ -234,31 +234,31 @@ export async function completeJob(
     throw new Error("Transcript does not match the claimed job");
   }
   await saveTranscript(transcript);
-  await rawDb()
-    .prepare(`
-      UPDATE jobs
-      SET status = 'complete', error = NULL, completed_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `)
-    .bind(id)
-    .run();
+  await getDb()
+    .update(jobs)
+    .set({
+      status: "complete",
+      error: null,
+      completedAt: sql`CURRENT_TIMESTAMP`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(jobs.id, id));
 }
 
 export async function failJob(id: string, error: string): Promise<void> {
   await ensureDatabase();
   const job = await getJob(id);
   if (!job) throw new Error("Job not found");
-  const terminal = job.attempts >= 3;
-  await rawDb()
-    .prepare(`
-      UPDATE jobs
-      SET status = ?, error = ?, worker_id = NULL, claimed_at = NULL,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `)
-    .bind(terminal ? "failed" : "queued", error.slice(0, 1000), id)
-    .run();
+  await getDb()
+    .update(jobs)
+    .set({
+      status: job.attempts >= 3 ? "failed" : "queued",
+      error: error.slice(0, 1000),
+      workerId: null,
+      claimedAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(jobs.id, id));
 }
 
 export async function searchTranscripts(
@@ -269,22 +269,25 @@ export async function searchTranscripts(
   const tokens = meaningfulTokens(rawQuery);
   if (!tokens.length) return [];
   const safeLimit = Math.max(1, Math.min(limit, 50));
-
+  const document = sql<string>`concat_ws(
+    ' ',
+    ${transcripts.title},
+    ${transcripts.channel},
+    ${transcripts.description},
+    ${transcripts.topicsJson},
+    ${transcripts.transcriptText}
+  )`;
   const conditions = tokens.map(
-    () =>
-      "instr(lower(title || ' ' || channel || ' ' || description || ' ' || topics_json || ' ' || transcript_text), ?) > 0",
+    (token) => sql`${document} ILIKE ${`%${token}%`}`,
   );
-  const rows = await rawDb()
-    .prepare(`
-      SELECT * FROM transcripts
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY updated_at DESC
-      LIMIT 200
-    `)
-    .bind(...tokens)
-    .all<TranscriptRow>();
+  const rows = await getDb()
+    .select()
+    .from(transcripts)
+    .where(and(...conditions))
+    .orderBy(desc(transcripts.updatedAt))
+    .limit(200);
 
-  return rows.results
+  return rows
     .map((row) => {
       const transcript = mapTranscript(row);
       return {
@@ -295,7 +298,9 @@ export async function searchTranscripts(
     .sort(
       (left, right) =>
         right.score - left.score ||
-        right.transcript.updatedAt.localeCompare(left.transcript.updatedAt),
+        (right.transcript.updatedAt ?? "").localeCompare(
+          left.transcript.updatedAt ?? "",
+        ),
     )
     .slice(0, safeLimit)
     .map(({ transcript }) => ({
@@ -308,15 +313,15 @@ export async function listTranscriptIds(): Promise<
   Array<{ providerId: string; updatedAt: string }>
 > {
   await ensureDatabase();
-  const rows = await rawDb()
-    .prepare(
-      "SELECT provider_id, updated_at FROM transcripts WHERE provider = 'youtube' ORDER BY updated_at DESC",
-    )
-    .all<{ provider_id: string; updated_at: string }>();
-  return rows.results.map((row) => ({
-    providerId: row.provider_id,
-    updatedAt: row.updated_at,
-  }));
+  const rows = await getDb()
+    .select({
+      providerId: transcripts.providerId,
+      updatedAt: transcripts.updatedAt,
+    })
+    .from(transcripts)
+    .where(eq(transcripts.provider, "youtube"))
+    .orderBy(desc(transcripts.updatedAt));
+  return rows;
 }
 
 export async function getCounts(): Promise<{
@@ -325,20 +330,23 @@ export async function getCounts(): Promise<{
   processing: number;
 }> {
   await ensureDatabase();
-  const db = rawDb();
-  const [transcripts, queued, processing] = await Promise.all([
-    db.prepare("SELECT count(*) AS count FROM transcripts").first<{ count: number }>(),
-    db
-      .prepare("SELECT count(*) AS count FROM jobs WHERE status = 'queued'")
-      .first<{ count: number }>(),
-    db
-      .prepare("SELECT count(*) AS count FROM jobs WHERE status = 'processing'")
-      .first<{ count: number }>(),
-  ]);
+  const database = getDb();
+  const [[transcriptCount], [queuedCount], [processingCount]] =
+    await Promise.all([
+      database.select({ value: count() }).from(transcripts),
+      database
+        .select({ value: count() })
+        .from(jobs)
+        .where(eq(jobs.status, "queued")),
+      database
+        .select({ value: count() })
+        .from(jobs)
+        .where(eq(jobs.status, "processing")),
+    ]);
   return {
-    transcripts: transcripts?.count ?? 0,
-    queued: queued?.count ?? 0,
-    processing: processing?.count ?? 0,
+    transcripts: transcriptCount?.value ?? 0,
+    queued: queuedCount?.value ?? 0,
+    processing: processingCount?.value ?? 0,
   };
 }
 
@@ -347,24 +355,28 @@ export async function checkAndRecordSubmission(
   maximum = 10,
 ): Promise<boolean> {
   await ensureDatabase();
-  const db = rawDb();
-  await db
-    .prepare("DELETE FROM submission_events WHERE created_at < datetime('now', '-2 hours')")
-    .run();
-  const recent = await db
-    .prepare(`
-      SELECT count(*) AS count FROM submission_events
-      WHERE client_hash = ? AND created_at >= datetime('now', '-1 hour')
-    `)
-    .bind(clientHash)
-    .first<{ count: number }>();
-  if ((recent?.count ?? 0) >= maximum) return false;
-  await db
-    .prepare(
-      "INSERT INTO submission_events (id, client_hash) VALUES (?, ?)",
-    )
-    .bind(crypto.randomUUID(), clientHash)
-    .run();
+  const database = getDb();
+  const now = Date.now();
+  const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000).toISOString();
+  const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
+
+  await database
+    .delete(submissionEvents)
+    .where(lt(submissionEvents.createdAt, twoHoursAgo));
+  const [recent] = await database
+    .select({ value: count() })
+    .from(submissionEvents)
+    .where(
+      and(
+        eq(submissionEvents.clientHash, clientHash),
+        gte(submissionEvents.createdAt, oneHourAgo),
+      ),
+    );
+  if ((recent?.value ?? 0) >= maximum) return false;
+  await database.insert(submissionEvents).values({
+    id: crypto.randomUUID(),
+    clientHash,
+  });
   return true;
 }
 
@@ -403,10 +415,9 @@ function validateTranscript(value: TranscriptRecord): TranscriptRecord {
     title: value.title.trim().slice(0, 500) || value.providerId,
     channel: value.channel.trim().slice(0, 500),
     description: value.description.trim().slice(0, 5000),
-    topics: [...new Set(value.topics.map((topic) => topic.trim()).filter(Boolean))].slice(
-      0,
-      20,
-    ),
+    topics: [
+      ...new Set(value.topics.map((topic) => topic.trim()).filter(Boolean)),
+    ].slice(0, 20),
     transcriptText: text,
     segments,
     wordCount: text.split(/\s+/).length,
@@ -416,43 +427,44 @@ function validateTranscript(value: TranscriptRecord): TranscriptRecord {
 function mapTranscript(row: TranscriptRow): TranscriptRecord {
   return {
     id: row.id,
-    provider: row.provider,
-    providerId: row.provider_id,
-    sourceUrl: row.source_url,
+    provider: row.provider as TranscriptRecord["provider"],
+    providerId: row.providerId,
+    sourceUrl: row.sourceUrl,
     title: row.title,
     channel: row.channel,
-    channelUrl: row.channel_url,
+    channelUrl: row.channelUrl,
     description: row.description,
-    publishedAt: row.published_at,
-    durationSeconds: row.duration_seconds,
+    publishedAt: row.publishedAt,
+    durationSeconds: row.durationSeconds,
     language: row.language,
-    transcriptSource: row.transcript_source,
+    transcriptSource:
+      row.transcriptSource as TranscriptRecord["transcriptSource"],
     license: row.license,
     attribution: row.attribution,
-    topics: safeJson<string[]>(row.topics_json, []),
-    transcriptText: row.transcript_text,
-    segments: safeJson<TranscriptSegment[]>(row.segments_json, []),
-    wordCount: row.word_count,
+    topics: safeJson<string[]>(row.topicsJson, []),
+    transcriptText: row.transcriptText,
+    segments: safeJson<TranscriptSegment[]>(row.segmentsJson, []),
+    wordCount: row.wordCount,
     checksum: row.checksum,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 
 function mapJob(row: JobRow): IngestionJob {
   return {
     id: row.id,
-    provider: row.provider,
-    providerId: row.provider_id,
-    sourceUrl: row.source_url,
-    status: row.status,
+    provider: row.provider as IngestionJob["provider"],
+    providerId: row.providerId,
+    sourceUrl: row.sourceUrl,
+    status: row.status as IngestionJob["status"],
     attempts: row.attempts,
-    workerId: row.worker_id,
+    workerId: row.workerId,
     error: row.error,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    claimedAt: row.claimed_at,
-    completedAt: row.completed_at,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    claimedAt: row.claimedAt,
+    completedAt: row.completedAt,
   };
 }
 

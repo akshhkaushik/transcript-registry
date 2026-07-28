@@ -39,40 +39,7 @@ Useful public URLs:
 - `/channels/CHANNEL_JOB_ID.json`
 - `/llms.txt`
 
-## Request one transcript on demand
-
-Open `/on-demand.json?url=YOUTUBE_URL`. If the transcript is already stored,
-Registry returns its HTML, text, and JSON URLs immediately. Otherwise it
-returns HTTP `202`, a job URL, and a suggested polling delay. The local worker
-claims the job, gets captions or runs permitted local ASR, and saves the
-result. Poll the job URL until it says `complete`, then open the returned
-transcript URL.
-
-## Use the requesting user's computer
-
-Coding agents such as Codex or Claude Code can avoid using the site owner's
-computer. Open `/contribute.txt` and follow the command there. The local helper:
-
-1. receives a short-lived token valid for only one video;
-2. reserves that job so the owner worker does not duplicate the work;
-3. gets creator captions, then automatic captions;
-4. runs local MLX Whisper or configured whisper.cpp only when captions are
-   absent and the user supplied `--allow-asr`;
-5. uploads text, timestamps and metadata, never audio;
-6. prints only status and final URLs so transcript contents do not consume the
-   coding agent's context.
-
-On first use, `--install-tools` installs `yt-dlp` into the helper environment.
-On Apple Silicon, `--install-asr` installs MLX Whisper only if ASR is needed.
-Temporary captions and audio are deleted automatically. Completed transcripts
-are stored once and immediately reused for every future request.
-
 ## Add a complete channel
-
-If you do not know the channel URL, use **Find a new YouTube channel** on the
-home page or call `/api/channel-search?q=QUERY`. The owner-operated worker
-searches YouTube and publishes candidate channels on the returned status page.
-Choose one candidate to queue all of its public uploads.
 
 Paste a channel URL such as `https://www.youtube.com/@channel` on the home
 page. Registry creates one channel job and the local worker:
@@ -84,12 +51,10 @@ page. Registry creates one channel job and the local worker:
 4. processes up to four caption jobs concurrently;
 5. allows only one permissioned local ASR job at a time by default.
 
-The public channel page separates workflow completion from real transcript
-coverage. It shows discovered, queued, processing, completed and failed counts,
-groups failures by reason, and reports elapsed time and ETA. The home page
-lists fully covered channels separately from partial or processing channels.
-Re-submitting a completed channel after six hours checks for new uploads
-without duplicating old records.
+The public channel page shows discovery batches, reported and discovered
+videos, queued/processing/completed/failed counts, measured seconds per video,
+elapsed time, progress, and ETA. Re-submitting a completed channel after six
+hours checks for new uploads without duplicating old records.
 
 ## Run the website locally
 

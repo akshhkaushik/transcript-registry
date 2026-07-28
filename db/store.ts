@@ -7,8 +7,6 @@ import {
   gte,
   inArray,
   isNotNull,
-  isNull,
-  like,
   lt,
   notLike,
   or,
@@ -16,9 +14,7 @@ import {
 } from "drizzle-orm";
 import type {
   ChannelJob,
-  ChannelCandidate,
   ChannelProgress,
-  ChannelSearchJob,
   IngestionJob,
   TopicJob,
   TranscriptRecord,
@@ -27,7 +23,6 @@ import type {
 import { getDb } from "./index";
 import {
   channelJobs,
-  channelSearchJobs,
   channelVideos,
   jobs,
   submissionEvents,
@@ -39,7 +34,6 @@ import { ensureDatabase } from "./runtime";
 type TranscriptRow = typeof transcripts.$inferSelect;
 type JobRow = typeof jobs.$inferSelect;
 type ChannelJobRow = typeof channelJobs.$inferSelect;
-type ChannelSearchJobRow = typeof channelSearchJobs.$inferSelect;
 type TopicJobRow = typeof topicJobs.$inferSelect;
 
 const STOP_WORDS = new Set([
@@ -130,20 +124,6 @@ export async function saveTranscripts(
         updatedAt: sql`CURRENT_TIMESTAMP`,
       },
     });
-}
-
-export async function saveTranscriptIfMissing(
-  value: TranscriptRecord,
-): Promise<boolean> {
-  await ensureDatabase();
-  const [created] = await getDb()
-    .insert(transcripts)
-    .values(transcriptInsert(value))
-    .onConflictDoNothing({
-      target: [transcripts.provider, transcripts.providerId],
-    })
-    .returning({ id: transcripts.id });
-  return Boolean(created);
 }
 
 export async function createOrRefreshChannelJob(
@@ -673,7 +653,6 @@ export async function completeJob(
   id: string,
   transcript: TranscriptRecord,
   processingSeconds?: number,
-  options: { overwriteExisting?: boolean } = {},
 ): Promise<void> {
   const job = await getJob(id);
   if (!job) throw new Error("Job not found");
@@ -740,206 +719,6 @@ export async function failJob(
     .where(eq(channelVideos.jobId, id));
   const channelIds = await channelIdsForJob(id);
   await Promise.all(channelIds.map(refreshChannelCompletion));
-}
-
-export async function getChannelSearchJob(
-  id: string,
-): Promise<ChannelSearchJob | null> {
-  await ensureDatabase();
-  const [row] = await getDb()
-    .select()
-    .from(channelSearchJobs)
-    .where(eq(channelSearchJobs.id, id))
-    .limit(1);
-  return row ? mapChannelSearchJob(row) : null;
-}
-
-export async function getChannelSearchJobForQuery(
-  query: string,
-): Promise<ChannelSearchJob | null> {
-  await ensureDatabase();
-  const normalizedQuery = normalizeTopicQuery(query);
-  if (!normalizedQuery) return null;
-  const [row] = await getDb()
-    .select()
-    .from(channelSearchJobs)
-    .where(eq(channelSearchJobs.normalizedQuery, normalizedQuery))
-    .limit(1);
-  return row ? mapChannelSearchJob(row) : null;
-}
-
-export async function createOrRefreshChannelSearchJob(
-  query: string,
-  resultLimit = 8,
-): Promise<{
-  job: ChannelSearchJob;
-  created: boolean;
-  refreshed: boolean;
-}> {
-  await ensureDatabase();
-  const cleanQuery = query.replace(/\s+/g, " ").trim().slice(0, 200);
-  const normalizedQuery = normalizeTopicQuery(cleanQuery);
-  if (!normalizedQuery) throw new Error("Channel query is too broad or empty");
-  const safeLimit = Math.max(1, Math.min(resultLimit, 15));
-  const database = getDb();
-  const [created] = await database
-    .insert(channelSearchJobs)
-    .values({
-      id: crypto.randomUUID(),
-      query: cleanQuery,
-      normalizedQuery,
-      resultLimit: safeLimit,
-    })
-    .onConflictDoNothing({ target: channelSearchJobs.normalizedQuery })
-    .returning();
-  if (created) {
-    return {
-      job: mapChannelSearchJob(created),
-      created: true,
-      refreshed: false,
-    };
-  }
-
-  const existing = await getChannelSearchJobForQuery(cleanQuery);
-  if (!existing) throw new Error("Channel search job was not created");
-  const stale =
-    existing.status === "complete" &&
-    Date.parse(existing.updatedAt) < Date.now() - 24 * 60 * 60 * 1000;
-  if (
-    existing.status === "processing" ||
-    (existing.status !== "failed" && !stale)
-  ) {
-    return { job: existing, created: false, refreshed: false };
-  }
-  const [refreshed] = await database
-    .update(channelSearchJobs)
-    .set({
-      query: cleanQuery,
-      status: "queued",
-      resultLimit: safeLimit,
-      resultsJson: "[]",
-      attempts: 0,
-      workerId: null,
-      error: null,
-      claimedAt: null,
-      completedAt: null,
-      updatedAt: sql`CURRENT_TIMESTAMP`,
-    })
-    .where(eq(channelSearchJobs.id, existing.id))
-    .returning();
-  if (!refreshed) throw new Error("Channel search job was not refreshed");
-  return {
-    job: mapChannelSearchJob(refreshed),
-    created: false,
-    refreshed: true,
-  };
-}
-
-export async function claimChannelSearchJob(
-  workerId: string,
-): Promise<ChannelSearchJob | null> {
-  await ensureDatabase();
-  const database = getDb();
-  const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-  await database
-    .update(channelSearchJobs)
-    .set({
-      status: "queued",
-      workerId: null,
-      claimedAt: null,
-      updatedAt: sql`CURRENT_TIMESTAMP`,
-    })
-    .where(
-      and(
-        eq(channelSearchJobs.status, "processing"),
-        lt(channelSearchJobs.claimedAt, staleBefore),
-        lt(channelSearchJobs.attempts, 3),
-      ),
-    );
-  const [candidate] = await database
-    .select({ id: channelSearchJobs.id })
-    .from(channelSearchJobs)
-    .where(
-      and(
-        eq(channelSearchJobs.status, "queued"),
-        lt(channelSearchJobs.attempts, 3),
-      ),
-    )
-    .orderBy(asc(channelSearchJobs.createdAt))
-    .limit(1);
-  if (!candidate) return null;
-  const [claimed] = await database
-    .update(channelSearchJobs)
-    .set({
-      status: "processing",
-      workerId,
-      attempts: sql`${channelSearchJobs.attempts} + 1`,
-      claimedAt: sql`CURRENT_TIMESTAMP`,
-      updatedAt: sql`CURRENT_TIMESTAMP`,
-    })
-    .where(
-      and(
-        eq(channelSearchJobs.id, candidate.id),
-        eq(channelSearchJobs.status, "queued"),
-      ),
-    )
-    .returning();
-  return claimed ? mapChannelSearchJob(claimed) : null;
-}
-
-export async function completeChannelSearchJob(
-  id: string,
-  candidates: ChannelCandidate[],
-): Promise<void> {
-  await ensureDatabase();
-  const results = [
-    ...new Map(
-      candidates
-        .map((candidate) => {
-          const channelId = candidate.channelId.trim().slice(0, 100);
-          if (!/^[A-Za-z0-9_-]{10,100}$/.test(channelId)) return null;
-          return {
-            channelId,
-            name: candidate.name.trim().slice(0, 500) || channelId,
-            url: `https://www.youtube.com/channel/${channelId}`,
-            description: candidate.description.trim().slice(0, 1000),
-          };
-        })
-        .filter((candidate) => candidate !== null)
-        .map((candidate) => [candidate.channelId, candidate]),
-    ).values(),
-  ].slice(0, 15);
-  const [updated] = await getDb()
-    .update(channelSearchJobs)
-    .set({
-      status: "complete",
-      resultsJson: JSON.stringify(results),
-      error: null,
-      completedAt: sql`CURRENT_TIMESTAMP`,
-      updatedAt: sql`CURRENT_TIMESTAMP`,
-    })
-    .where(eq(channelSearchJobs.id, id))
-    .returning({ id: channelSearchJobs.id });
-  if (!updated) throw new Error("Channel search job not found");
-}
-
-export async function failChannelSearchJob(
-  id: string,
-  error: string,
-): Promise<void> {
-  await ensureDatabase();
-  const job = await getChannelSearchJob(id);
-  if (!job) throw new Error("Channel search job not found");
-  await getDb()
-    .update(channelSearchJobs)
-    .set({
-      status: job.attempts >= 3 ? "failed" : "queued",
-      error: error.slice(0, 1000),
-      workerId: null,
-      claimedAt: null,
-      updatedAt: sql`CURRENT_TIMESTAMP`,
-    })
-    .where(eq(channelSearchJobs.id, id));
 }
 
 export async function getTopicJob(id: string): Promise<TopicJob | null> {
@@ -1356,29 +1135,6 @@ async function channelProgress(job: ChannelJob): Promise<ChannelProgress> {
   const queuedVideos = Number(stats?.queued ?? 0);
   const processingVideos = Number(stats?.processing ?? 0);
   const failedVideos = Number(stats?.failed ?? 0);
-  const failureRows =
-    failedVideos > 0
-      ? await database
-          .select({
-            error: jobs.error,
-            value: count(),
-          })
-          .from(channelVideos)
-          .leftJoin(jobs, eq(channelVideos.jobId, jobs.id))
-          .where(
-            and(
-              eq(channelVideos.channelJobId, job.id),
-              eq(channelVideos.status, "failed"),
-            ),
-          )
-          .groupBy(jobs.error)
-      : [];
-  const failureReasons = failureRows
-    .map((row) => ({
-      reason: channelFailureReason(row.error),
-      count: Number(row.value),
-    }))
-    .sort((left, right) => right.count - left.count);
   let averageProcessingSeconds =
     stats?.averageSeconds == null ? null : Number(stats.averageSeconds);
   if (!averageProcessingSeconds && queuedVideos + processingVideos > 0) {
@@ -1423,16 +1179,6 @@ async function channelProgress(job: ChannelJob): Promise<ChannelProgress> {
                 Math.max(1, job.concurrency),
             )
           : null;
-  const transcriptCoveragePercent =
-    denominator > 0
-      ? Math.min(100, Math.round((completedVideos / denominator) * 100))
-      : 0;
-  const fullyCovered =
-    denominator > 0 &&
-    completedVideos >= denominator &&
-    failedVideos === 0 &&
-    queuedVideos === 0 &&
-    processingVideos === 0;
   return {
     ...job,
     discoveredVideos,
@@ -1444,38 +1190,11 @@ async function channelProgress(job: ChannelJob): Promise<ChannelProgress> {
     averageProcessingSeconds,
     observedVideosPerMinute,
     estimatedSecondsRemaining,
-    transcriptCoveragePercent,
-    fullyCovered,
-    failureReasons,
     progressPercent:
       denominator > 0
         ? Math.min(100, Math.round((terminalVideos / denominator) * 100))
         : 0,
   };
-}
-
-function channelFailureReason(error: string | null): string {
-  const value = (error ?? "").toLowerCase();
-  if (value.includes("no captions found") && value.includes("permission")) {
-    return "No captions; local ASR was not permitted for this channel";
-  }
-  if (
-    value.includes("private video") ||
-    value.includes("video unavailable") ||
-    value.includes("not available")
-  ) {
-    return "Video is private, deleted, blocked, or unavailable";
-  }
-  if (value.includes("sign in") || value.includes("age")) {
-    return "Video requires sign-in or age verification";
-  }
-  if (value.includes("install mlx-whisper") || value.includes("whisper.cpp")) {
-    return "Local ASR is permitted but no Whisper engine is configured";
-  }
-  if (value.includes("timed out") || value.includes("timeout")) {
-    return "YouTube or registry request timed out after retries";
-  }
-  return error?.trim().slice(0, 240) || "Unknown processing failure";
 }
 
 async function refreshChannelCompletion(id: string): Promise<void> {
@@ -1658,24 +1377,6 @@ function mapChannelJob(row: ChannelJobRow): ChannelJob {
     updatedAt: row.updatedAt,
     claimedAt: row.claimedAt,
     discoveryCompletedAt: row.discoveryCompletedAt,
-    completedAt: row.completedAt,
-  };
-}
-
-function mapChannelSearchJob(row: ChannelSearchJobRow): ChannelSearchJob {
-  return {
-    id: row.id,
-    query: row.query,
-    normalizedQuery: row.normalizedQuery,
-    status: row.status as ChannelSearchJob["status"],
-    resultLimit: row.resultLimit,
-    results: safeJson<ChannelCandidate[]>(row.resultsJson, []),
-    attempts: row.attempts,
-    workerId: row.workerId,
-    error: row.error,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    claimedAt: row.claimedAt,
     completedAt: row.completedAt,
   };
 }

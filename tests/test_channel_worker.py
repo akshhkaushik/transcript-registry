@@ -8,36 +8,6 @@ from worker import transcript_worker as worker
 
 
 class ChannelWorkerTests(unittest.TestCase):
-    def test_official_channel_search_returns_channel_candidates(self) -> None:
-        payload = {
-            "items": [
-                {
-                    "id": {"channelId": "UC1234567890"},
-                    "snippet": {
-                        "title": "Example Health",
-                        "description": "Evidence-based health videos",
-                    },
-                }
-            ]
-        }
-        with (
-            patch.object(worker, "YOUTUBE_API_KEY", "test-key"),
-            patch.object(worker, "youtube_api_json", return_value=payload),
-        ):
-            results = worker.discover_channels_with_api("health", 8)
-
-        self.assertEqual(
-            results,
-            [
-                {
-                    "channelId": "UC1234567890",
-                    "name": "Example Health",
-                    "url": "https://www.youtube.com/channel/UC1234567890",
-                    "description": "Evidence-based health videos",
-                }
-            ],
-        )
-
     def test_registry_writes_retry_after_a_transient_timeout(self) -> None:
         class FakeResponse:
             def __enter__(self):

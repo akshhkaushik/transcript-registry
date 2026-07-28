@@ -584,119 +584,6 @@ def youtube_api_json(resource: str, parameters: dict[str, Any]) -> dict[str, Any
         return json.loads(response.read().decode("utf-8"))
 
 
-def discover_channels_with_api(
-    query: str, limit: int
-) -> list[dict[str, str]]:
-    if not YOUTUBE_API_KEY:
-        return []
-    payload = youtube_api_json(
-        "search",
-        {
-            "part": "snippet",
-            "type": "channel",
-            "q": query,
-            "maxResults": min(limit, 15),
-            "order": "relevance",
-            "safeSearch": "moderate",
-            "relevanceLanguage": DISCOVERY_LANGUAGE,
-            "regionCode": DISCOVERY_REGION,
-        },
-    )
-    results: list[dict[str, str]] = []
-    for item in payload.get("items") or []:
-        identifier = item.get("id") or {}
-        snippet = item.get("snippet") or {}
-        channel_id = str(identifier.get("channelId") or "")
-        if not re.fullmatch(r"[A-Za-z0-9_-]{10,100}", channel_id):
-            continue
-        results.append(
-            {
-                "channelId": channel_id,
-                "name": str(snippet.get("title") or channel_id),
-                "url": f"https://www.youtube.com/channel/{channel_id}",
-                "description": str(snippet.get("description") or ""),
-            }
-        )
-    return results
-
-
-def discover_channels_with_ytdlp(
-    query: str, limit: int
-) -> list[dict[str, str]]:
-    search_limit = max(20, min(limit * 5, 75))
-    with tempfile.TemporaryDirectory(prefix="channel-search-") as directory:
-        output = run(
-            [
-                YT_DLP_BINARY,
-                "--dump-single-json",
-                "--flat-playlist",
-                "--skip-download",
-                "--no-warnings",
-                "--playlist-end",
-                str(search_limit),
-                f"ytsearch{search_limit}:{query}",
-            ],
-            Path(directory),
-            timeout=300,
-        )
-    payload = json.loads(output)
-    candidates: dict[str, dict[str, str]] = {}
-    for item in payload.get("entries") or []:
-        channel_id = str(item.get("channel_id") or "")
-        if (
-            not re.fullmatch(r"[A-Za-z0-9_-]{10,100}", channel_id)
-            or channel_id in candidates
-        ):
-            continue
-        name = str(
-            item.get("channel")
-            or item.get("uploader")
-            or item.get("channel_url")
-            or channel_id
-        )
-        candidates[channel_id] = {
-            "channelId": channel_id,
-            "name": name,
-            "url": f"https://www.youtube.com/channel/{channel_id}",
-            "description": (
-                f"Found through the matching video: "
-                f"{str(item.get('title') or '').strip()}"
-            ).strip(),
-        }
-        if len(candidates) >= limit:
-            break
-    return list(candidates.values())
-
-
-def discover_channel_candidates(job: dict[str, Any]) -> list[dict[str, str]]:
-    query = str(job.get("query") or "").strip()
-    limit = max(1, min(int(job.get("resultLimit") or 8), 15))
-    if YOUTUBE_API_KEY:
-        try:
-            results = discover_channels_with_api(query, limit)
-            if results:
-                return results
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            KeyError,
-            json.JSONDecodeError,
-        ) as error:
-            print(
-                f"YouTube channel search API failed; using yt-dlp: {error}",
-                flush=True,
-            )
-    return discover_channels_with_ytdlp(query, limit)
-
-
-def process_channel_search(job: dict[str, Any]) -> None:
-    request_json(
-        f"/api/worker/channel-searches/{job['id']}/complete",
-        {"channels": discover_channel_candidates(job)},
-        timeout=180,
-    )
-
-
 def channel_api_filter(url: str) -> dict[str, str] | None:
     parts = [part for part in urllib.parse.urlparse(url).path.split("/") if part]
     if not parts:
@@ -965,20 +852,6 @@ def handle_channel(job: dict[str, Any]) -> None:
         )
 
 
-def handle_channel_search(job: dict[str, Any]) -> None:
-    try:
-        process_channel_search(job)
-        print(f"completed channel search {job['query']}", flush=True)
-    except Exception as error:  # noqa: BLE001
-        message = str(error)[:1000]
-        print(f"failed channel search {job['query']}: {message}", flush=True)
-        report_failure(
-            f"/api/worker/channel-searches/{job['id']}/fail",
-            {"error": message},
-            f"channel search {job['id']}",
-        )
-
-
 def handle_topic(job: dict[str, Any]) -> None:
     try:
         process_topic(job)
@@ -1009,12 +882,6 @@ def process_once() -> None:
     )
     if jobs:
         handle_video(jobs[0])
-        return
-    channel_search = request_json(
-        "/api/worker/channel-searches/claim", {"workerId": WORKER_ID}
-    ).get("job")
-    if channel_search:
-        handle_channel_search(channel_search)
         return
     topic = request_json(
         "/api/worker/topics/claim", {"workerId": WORKER_ID}
@@ -1058,7 +925,7 @@ def main() -> int:
     concurrency = max(1, min(args.concurrency, 8))
     video_futures: set[Future[None]] = set()
     discovery_future: Future[None] | None = None
-    next_discovery_poll = 0.0
+    next_channel_poll = 0.0
     with (
         ThreadPoolExecutor(
             max_workers=concurrency,
@@ -1089,7 +956,7 @@ def main() -> int:
                 progressed = True
 
             now = time.monotonic()
-            if discovery_future is None and now >= next_discovery_poll:
+            if discovery_future is None and now >= next_channel_poll:
                 channel = claim_json(
                     "/api/worker/channels/claim",
                     {"workerId": WORKER_ID},
@@ -1101,18 +968,7 @@ def main() -> int:
                     )
                     progressed = True
                 else:
-                    channel_search = claim_json(
-                        "/api/worker/channel-searches/claim",
-                        {"workerId": WORKER_ID},
-                    ).get("job")
-                    if channel_search:
-                        discovery_future = discovery_executor.submit(
-                            handle_channel_search,
-                            channel_search,
-                        )
-                        progressed = True
-                    else:
-                        next_discovery_poll = now + 5
+                    next_channel_poll = now + 5
 
             open_slots = concurrency - len(video_futures)
             claimed_video = False

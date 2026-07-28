@@ -36,10 +36,6 @@ const nextConfig: NextConfig = {
         source: "/channels/:id.json",
         destination: "/api/channels/:id",
       },
-      {
-        source: "/channel-searches/:id.json",
-        destination: "/api/channel-searches/:id",
-      },
     ];
   },
 };

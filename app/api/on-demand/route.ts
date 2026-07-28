@@ -127,6 +127,16 @@ async function serviceTranscript(
       job: jobUrl,
       retryAfterSeconds: 15,
       afterCompletion: paths,
+      localContribution: {
+        instructions: `${requestUrl.origin}/contribute.txt`,
+        helper: `${requestUrl.origin}/contribute.py`,
+        command:
+          `curl -fsSL ${requestUrl.origin}/contribute.sh | sh -s -- ` +
+          `${source.canonicalUrl} --registry ${requestUrl.origin} ` +
+          "--allow-asr --install-asr",
+        note:
+          "Run this from the requesting user's coding agent or terminal to use that computer instead of the owner worker.",
+      },
     },
     202,
     { "Retry-After": "15", Location: jobUrl },

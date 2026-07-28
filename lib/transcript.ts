@@ -48,6 +48,8 @@ export async function coerceTranscript(
     durationSeconds: optionalNumber(input.durationSeconds),
     language: readString(input.language) || "en",
     transcriptSource: source,
+    ingestionSource:
+      source === "licensed-dataset" ? "dataset-import" : "owner-worker",
     license: readString(input.license) || "unknown",
     attribution: readString(input.attribution),
     topics: Array.isArray(input.topics)

@@ -73,6 +73,8 @@ export default async function TranscriptPage({ params }: PageProps) {
             <dd>{transcript.language}</dd>
             <dt>Method</dt>
             <dd>{transcript.transcriptSource}</dd>
+            <dt>Ingestion</dt>
+            <dd>{transcript.ingestionSource}</dd>
             <dt>License</dt>
             <dd>{transcript.license}</dd>
             <dt>Words</dt>

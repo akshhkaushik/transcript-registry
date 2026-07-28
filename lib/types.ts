@@ -23,6 +23,10 @@ export type TranscriptRecord = {
     | "automatic-captions"
     | "local-asr"
     | "licensed-dataset";
+  ingestionSource:
+    | "owner-worker"
+    | "community-worker"
+    | "dataset-import";
   license: string;
   attribution: string;
   topics: string[];

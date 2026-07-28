@@ -36,6 +36,13 @@
       "when": 1785243571836,
       "tag": "0004_ambiguous_human_torch",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785254800067,
+      "tag": "0005_fixed_shinko_yamashiro",
+      "breakpoints": true
     }
   ]
 }

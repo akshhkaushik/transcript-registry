@@ -1,0 +1,1 @@
+ALTER TABLE "transcripts" ADD COLUMN "ingestion_source" text DEFAULT 'owner-worker' NOT NULL;

@@ -41,6 +41,7 @@ test("renders only the minimal submission interface", async () => {
   assert.match(html, /Processing or partially covered channels/);
   assert.match(html, /Add a complete YouTube channel/);
   assert.match(html, /Request transcript/);
+  assert.match(html, /local contribution instructions/);
   assert.doesNotMatch(
     html,
     /codex-preview|react-loading-skeleton|Browse categories/i,
@@ -125,6 +126,43 @@ test("on-demand rejects invalid sources without creating a job", async () => {
   assert.equal((await response.json()).status, "invalid");
 });
 
+test("local contribution preparation reuses an existing transcript", async () => {
+  const response = await request("/api/contributions/prepare", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ url: "Txqe_CAD43c" }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, "complete");
+  assert.equal(body.videoId, "Txqe_CAD43c");
+  assert.equal("token" in body, false);
+});
+
+test("local contribution preparation rejects invalid video input", async () => {
+  const response = await request("/api/contributions/prepare", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ url: "https://example.com/video" }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).status, "invalid");
+});
+
+test("publishes local contributor scripts and agent instructions", async () => {
+  const [instructions, python, shell] = await Promise.all([
+    request("/contribute.txt"),
+    request("/contribute.py"),
+    request("/contribute.sh"),
+  ]);
+  assert.equal(instructions.status, 200);
+  assert.match(await instructions.text(), /user's computer/i);
+  assert.equal(python.status, 200);
+  assert.match(await python.text(), /api\/contributions\/prepare/);
+  assert.equal(shell.status, 200);
+  assert.match(await shell.text(), /transcript-registry/);
+});
+
 test("rejects a video URL submitted as a channel", async () => {
   const response = await request("/api/channels", {
     method: "POST",
@@ -188,6 +226,7 @@ test("publishes crawler rules and machine endpoint instructions", async () => {
   assert.match(robots, /User-agent: Claude-SearchBot[\s\S]*Allow: \//);
   assert.match(llms, /\/search\.txt\?q=QUERY/);
   assert.match(llms, /\/on-demand\.json\?url=YOUTUBE_URL/);
+  assert.match(llms, /\/contribute\.txt/);
   assert.match(llms, /\/youtube\/VIDEO_ID\.txt/);
 });
 

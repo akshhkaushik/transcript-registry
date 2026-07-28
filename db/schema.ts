@@ -25,6 +25,7 @@ export const transcripts = pgTable(
     durationSeconds: integer("duration_seconds"),
     language: text("language").notNull().default("en"),
     transcriptSource: text("transcript_source").notNull(),
+    ingestionSource: text("ingestion_source").notNull().default("owner-worker"),
     license: text("license").notNull().default("unknown"),
     attribution: text("attribution").notNull().default(""),
     topicsJson: text("topics_json").notNull().default("[]"),

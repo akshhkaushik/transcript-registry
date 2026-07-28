@@ -18,8 +18,11 @@ Live site: https://transcript-registry.vercel.app
 5. The background worker gets existing captions first. If captions are missing
    and the source is permitted, it can transcribe audio with MLX Whisper or
    whisper.cpp.
-6. The transcript is saved in Neon and stays available as HTML, plain text,
-   and JSON.
+6. A coding agent can instead run `/contribute.txt` on its user's computer.
+   That computer gets captions or runs Whisper, uploads only the transcript,
+   and deletes temporary audio.
+7. The transcript is saved in Neon and stays available to everyone as HTML,
+   plain text, and JSON.
 
 Useful public URLs:
 
@@ -27,6 +30,7 @@ Useful public URLs:
 - `/search.json?q=topic`
 - `/on-demand.json?url=YOUTUBE_URL`
 - `/on-demand.txt?url=YOUTUBE_URL`
+- `/contribute.txt`
 - `/youtube/VIDEO_ID`
 - `/youtube/VIDEO_ID.txt`
 - `/youtube/VIDEO_ID.json`
@@ -43,6 +47,25 @@ returns HTTP `202`, a job URL, and a suggested polling delay. The local worker
 claims the job, gets captions or runs permitted local ASR, and saves the
 result. Poll the job URL until it says `complete`, then open the returned
 transcript URL.
+
+## Use the requesting user's computer
+
+Coding agents such as Codex or Claude Code can avoid using the site owner's
+computer. Open `/contribute.txt` and follow the command there. The local helper:
+
+1. receives a short-lived token valid for only one video;
+2. reserves that job so the owner worker does not duplicate the work;
+3. gets creator captions, then automatic captions;
+4. runs local MLX Whisper or configured whisper.cpp only when captions are
+   absent and the user supplied `--allow-asr`;
+5. uploads text, timestamps and metadata, never audio;
+6. prints only status and final URLs so transcript contents do not consume the
+   coding agent's context.
+
+On first use, `--install-tools` installs `yt-dlp` into the helper environment.
+On Apple Silicon, `--install-asr` installs MLX Whisper only if ASR is needed.
+Temporary captions and audio are deleted automatically. Completed transcripts
+are stored once and immediately reused for every future request.
 
 ## Add a complete channel
 
@@ -70,8 +93,9 @@ without duplicating old records.
 
 ## Run the website locally
 
-Copy `.env.example` to `.env.local`. Add a PostgreSQL `DATABASE_URL` and two
-private random values for `WORKER_TOKEN` and `RATE_LIMIT_SALT`, then run:
+Copy `.env.example` to `.env.local`. Add a PostgreSQL `DATABASE_URL` and long
+private random values for `WORKER_TOKEN`, `CONTRIBUTION_SECRET`, and
+`RATE_LIMIT_SALT`, then run:
 
 ```sh
 npm install

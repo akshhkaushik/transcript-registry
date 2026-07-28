@@ -38,6 +38,12 @@ export default async function ChannelPage({
           channel.reportedVideoCount ?? channel.discoveredVideos,
         )}
       />
+      <p>
+        Workflow completion: {channel.progressPercent}% · Transcript coverage:{" "}
+        {channel.completedVideos}/
+        {channel.reportedVideoCount ?? channel.discoveredVideos} (
+        {channel.transcriptCoveragePercent}%)
+      </p>
       <dl>
         <dt>Status</dt>
         <dd>{channel.status}</dd>
@@ -53,6 +59,8 @@ export default async function ChannelPage({
         <dd>{channel.queuedVideos}</dd>
         <dt>Failed after retries</dt>
         <dd>{channel.failedVideos}</dd>
+        <dt>Fully covered</dt>
+        <dd>{channel.fullyCovered ? "Yes" : "No"}</dd>
         <dt>Discovery batches</dt>
         <dd>{channel.batchesReceived}</dd>
         <dt>Video concurrency</dt>
@@ -78,6 +86,18 @@ export default async function ChannelPage({
             : formatDuration(channel.estimatedSecondsRemaining)}
         </dd>
       </dl>
+      {channel.failureReasons.length ? (
+        <section>
+          <h2>Why transcripts failed</h2>
+          <ul>
+            {channel.failureReasons.map((failure) => (
+              <li key={failure.reason}>
+                {failure.count} videos: {failure.reason}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
       {channel.error ? <p>{channel.error}</p> : null}
       <p className="muted">
         ETA is based on observed processing time and configured concurrency.

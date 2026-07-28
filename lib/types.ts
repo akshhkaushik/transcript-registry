@@ -87,6 +87,32 @@ export type ChannelProgress = ChannelJob & {
   observedVideosPerMinute: number | null;
   estimatedSecondsRemaining: number | null;
   progressPercent: number;
+  transcriptCoveragePercent: number;
+  fullyCovered: boolean;
+  failureReasons: Array<{ reason: string; count: number }>;
+};
+
+export type ChannelCandidate = {
+  channelId: string;
+  name: string;
+  url: string;
+  description: string;
+};
+
+export type ChannelSearchJob = {
+  id: string;
+  query: string;
+  normalizedQuery: string;
+  status: "queued" | "processing" | "complete" | "failed";
+  resultLimit: number;
+  results: ChannelCandidate[];
+  attempts: number;
+  workerId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  claimedAt: string | null;
+  completedAt: string | null;
 };
 
 export type TopicJob = {

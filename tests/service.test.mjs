@@ -104,6 +104,8 @@ test("publishes crawler rules and machine endpoint instructions", async () => {
   assert.match(robots, /User-agent: OAI-SearchBot[\s\S]*Allow: \//);
   assert.match(robots, /User-agent: Claude-SearchBot[\s\S]*Allow: \//);
   assert.match(llms, /\/search\.txt\?q=QUERY/);
+  assert.match(llms, /\/on-demand\.json\?url=YOUTUBE_URL/);
+  assert.match(llms, /\/contribute\.txt/);
   assert.match(llms, /\/youtube\/VIDEO_ID\.txt/);
 });
 

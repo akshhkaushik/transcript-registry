@@ -54,6 +54,7 @@ export function transcriptAsText(transcript: TranscriptRecord): string {
     `Source: ${transcript.sourceUrl}`,
     `Language: ${transcript.language}`,
     `Transcript source: ${transcript.transcriptSource}`,
+    `Ingestion: ${transcript.ingestionSource}`,
     `License: ${transcript.license}`,
     `Published: ${transcript.publishedAt ?? "Unknown"}`,
     `Duration: ${

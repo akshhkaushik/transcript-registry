@@ -8,7 +8,8 @@ Live site: https://transcript-registry.vercel.app
 ## How it works
 
 1. Search `/search.txt?q=your+topic`.
-2. Open a result such as `/youtube/VIDEO_ID.txt`.
+2. Results include matching transcript videos and tracked YouTube channels.
+   Open a video result such as `/youtube/VIDEO_ID.txt`.
 3. A zero-result search creates a topic-discovery job automatically. The
    response gives agents a `/topics/JOB_ID.json` URL to poll.
 4. A local worker discovers matching captioned Creative Commons videos and
@@ -17,13 +18,19 @@ Live site: https://transcript-registry.vercel.app
 5. The background worker gets existing captions first. If captions are missing
    and the source is permitted, it can transcribe audio with MLX Whisper or
    whisper.cpp.
-6. The transcript is saved in Neon and stays available as HTML, plain text,
-   and JSON.
+6. A coding agent can instead run `/contribute.txt` on its user's computer.
+   That computer gets captions or runs Whisper, uploads only the transcript,
+   and deletes temporary audio.
+7. The transcript is saved in Neon and stays available to everyone as HTML,
+   plain text, and JSON.
 
 Useful public URLs:
 
 - `/search.txt?q=topic`
 - `/search.json?q=topic`
+- `/on-demand.json?url=YOUTUBE_URL`
+- `/on-demand.txt?url=YOUTUBE_URL`
+- `/contribute.txt`
 - `/youtube/VIDEO_ID`
 - `/youtube/VIDEO_ID.txt`
 - `/youtube/VIDEO_ID.json`
@@ -51,8 +58,9 @@ hours checks for new uploads without duplicating old records.
 
 ## Run the website locally
 
-Copy `.env.example` to `.env.local`. Add a PostgreSQL `DATABASE_URL` and two
-private random values for `WORKER_TOKEN` and `RATE_LIMIT_SALT`, then run:
+Copy `.env.example` to `.env.local`. Add a PostgreSQL `DATABASE_URL` and long
+private random values for `WORKER_TOKEN`, `CONTRIBUTION_SECRET`, and
+`RATE_LIMIT_SALT`, then run:
 
 ```sh
 npm install

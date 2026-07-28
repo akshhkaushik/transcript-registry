@@ -25,6 +25,7 @@ export const transcripts = pgTable(
     durationSeconds: integer("duration_seconds"),
     language: text("language").notNull().default("en"),
     transcriptSource: text("transcript_source").notNull(),
+    ingestionSource: text("ingestion_source").notNull().default("owner-worker"),
     license: text("license").notNull().default("unknown"),
     attribution: text("attribution").notNull().default(""),
     topicsJson: text("topics_json").notNull().default("[]"),
@@ -147,6 +148,32 @@ export const topicJobs = pgTable(
   (table) => [
     uniqueIndex("topic_jobs_normalized_query_idx").on(table.normalizedQuery),
     index("topic_jobs_status_created_idx").on(table.status, table.createdAt),
+  ],
+);
+
+export const channelSearchJobs = pgTable(
+  "channel_search_jobs",
+  {
+    id: text("id").primaryKey(),
+    query: text("query").notNull(),
+    normalizedQuery: text("normalized_query").notNull(),
+    status: text("status").notNull().default("queued"),
+    resultLimit: integer("result_limit").notNull().default(8),
+    resultsJson: text("results_json").notNull().default("[]"),
+    attempts: integer("attempts").notNull().default(0),
+    workerId: text("worker_id"),
+    error: text("error"),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
+    updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
+    claimedAt: timestampColumn("claimed_at"),
+    completedAt: timestampColumn("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("channel_search_jobs_query_idx").on(table.normalizedQuery),
+    index("channel_search_jobs_status_created_idx").on(
+      table.status,
+      table.createdAt,
+    ),
   ],
 );
 

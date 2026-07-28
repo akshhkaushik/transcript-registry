@@ -3,6 +3,7 @@ import {
   createOrRefreshTopicJob,
   getTopicJobForQuery,
   meaningfulTokens,
+  searchChannels,
   searchTranscripts,
 } from "../../../db/store";
 import {
@@ -24,11 +25,17 @@ export async function GET(request: Request): Promise<Response> {
       50,
     ),
   );
-  const results = query ? await searchTranscripts(query, limit) : [];
+  const [results, channels] = query
+    ? await Promise.all([
+        searchTranscripts(query, limit),
+        searchChannels(query, Math.min(limit, 25)),
+      ])
+    : [[], []];
   const discovery = await discoveryForMiss(request, query, results.length);
   const body = {
     query,
     count: results.length,
+    channelCount: channels.length,
     results: results.map((result) => ({
       provider: result.provider,
       videoId: result.providerId,
@@ -38,6 +45,32 @@ export async function GET(request: Request): Promise<Response> {
       transcript: `/youtube/${result.providerId}`,
       text: `/youtube/${result.providerId}.txt`,
       snippet: result.snippet,
+    })),
+    channels: channels.map((channel) => ({
+      id: channel.id,
+      name:
+        channel.channelName ||
+        channel.normalizedUrl.split("/").filter(Boolean).at(-1) ||
+        "YouTube channel",
+      source: channel.channelUrl ?? channel.normalizedUrl,
+      status: channel.status,
+      progress: {
+        discovered: channel.discoveredVideos,
+        complete: channel.completedVideos,
+        failed: channel.failedVideos,
+        queued: channel.queuedVideos,
+        processing: channel.processingVideos,
+        percent: channel.progressPercent,
+      },
+      transcriptCoverage: {
+        complete: channel.completedVideos,
+        total: channel.reportedVideoCount ?? channel.discoveredVideos,
+        percent: channel.transcriptCoveragePercent,
+        fullyCovered: channel.fullyCovered,
+      },
+      failureReasons: channel.failureReasons,
+      page: `/channels/${channel.id}`,
+      json: `/channels/${channel.id}.json`,
     })),
     discovery:
       discovery && "job" in discovery
@@ -51,7 +84,12 @@ export async function GET(request: Request): Promise<Response> {
   };
 
   if (url.searchParams.get("format") === "txt") {
-    const lines = [`Query: ${query}`, `Results: ${results.length}`, ""];
+    const lines = [
+      `Query: ${query}`,
+      `Results: ${results.length}`,
+      `Channels: ${channels.length}`,
+      "",
+    ];
     for (const [index, result] of results.entries()) {
       lines.push(
         `${index + 1}. ${result.title}`,
@@ -59,6 +97,25 @@ export async function GET(request: Request): Promise<Response> {
         `Transcript: ${url.origin}/youtube/${result.providerId}.txt`,
         `Source: ${result.sourceUrl}`,
         `Match: ${result.snippet}`,
+        "",
+      );
+    }
+    for (const [index, channel] of channels.entries()) {
+      lines.push(
+        `Channel ${index + 1}: ${channel.channelName || channel.normalizedUrl}`,
+        `Status: ${channel.status}`,
+        `Transcript coverage: ${channel.completedVideos}/${channel.reportedVideoCount ?? channel.discoveredVideos} (${channel.transcriptCoveragePercent}%)`,
+        `Workflow completion: ${channel.progressPercent}%`,
+        ...(channel.failureReasons.length
+          ? [
+              `Failures: ${channel.failureReasons
+                .map((failure) => `${failure.count}× ${failure.reason}`)
+                .join("; ")}`,
+            ]
+          : []),
+        `Channel page: ${url.origin}/channels/${channel.id}`,
+        `Channel status: ${url.origin}/channels/${channel.id}.json`,
+        `YouTube: ${channel.channelUrl ?? channel.normalizedUrl}`,
         "",
       );
     }

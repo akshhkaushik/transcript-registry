@@ -34,12 +34,46 @@ test("renders only the minimal submission interface", async () => {
   assert.match(html, /Transcript Registry/);
   assert.match(html, /action="\/api\/add"/);
   assert.match(html, /action="\/api\/channels"/);
+  assert.match(html, /Search videos and YouTube channels/);
+  assert.match(html, /name="q"/);
   assert.match(html, /Add a complete YouTube channel/);
-  assert.match(html, /Add transcript/);
+  assert.match(html, /Request transcript/);
   assert.doesNotMatch(
     html,
     /codex-preview|react-loading-skeleton|Browse categories/i,
   );
+});
+
+test("unified search returns transcript videos and matching channels", async () => {
+  const response = await request(
+    "/search.json?q=action%20physics&limit=2&discover=0",
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.ok(Array.isArray(body.results));
+  assert.ok(Array.isArray(body.channels));
+  assert.ok(
+    body.channels.some((channel) => channel.name === "Action Physics"),
+  );
+});
+
+test("on-demand returns an existing transcript immediately", async () => {
+  const response = await request(
+    "/on-demand.json?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DTxqe_CAD43c",
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, "complete");
+  assert.equal(body.videoId, "Txqe_CAD43c");
+  assert.match(body.text, /\/youtube\/Txqe_CAD43c\.txt$/);
+});
+
+test("on-demand rejects invalid sources without creating a job", async () => {
+  const response = await request(
+    "/on-demand.json?url=https%3A%2F%2Fexample.com%2Fvideo",
+  );
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).status, "invalid");
 });
 
 test("rejects a video URL submitted as a channel", async () => {
@@ -104,6 +138,7 @@ test("publishes crawler rules and machine endpoint instructions", async () => {
   assert.match(robots, /User-agent: OAI-SearchBot[\s\S]*Allow: \//);
   assert.match(robots, /User-agent: Claude-SearchBot[\s\S]*Allow: \//);
   assert.match(llms, /\/search\.txt\?q=QUERY/);
+  assert.match(llms, /\/on-demand\.json\?url=YOUTUBE_URL/);
   assert.match(llms, /\/youtube\/VIDEO_ID\.txt/);
 });
 

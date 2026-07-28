@@ -853,6 +853,36 @@ export async function searchTranscripts(
   });
 }
 
+export async function searchChannels(
+  rawQuery: string,
+  limit = 10,
+): Promise<ChannelProgress[]> {
+  await ensureDatabase();
+  const tokens = meaningfulTokens(rawQuery);
+  if (!tokens.length) return [];
+  const safeLimit = Math.max(1, Math.min(limit, 25));
+  const searchable = sql`lower(concat_ws(' ',
+    ${channelJobs.channelName},
+    coalesce(${channelJobs.channelId}, ''),
+    ${channelJobs.normalizedUrl}
+  ))`;
+  const rows = await getDb()
+    .select()
+    .from(channelJobs)
+    .where(
+      and(
+        ...tokens.map(
+          (token) => sql`position(${token} in ${searchable}) > 0`,
+        ),
+      ),
+    )
+    .orderBy(desc(channelJobs.updatedAt))
+    .limit(safeLimit);
+  return Promise.all(
+    rows.map((row) => channelProgress(mapChannelJob(row))),
+  );
+}
+
 export async function listTranscriptIds(): Promise<
   Array<{ providerId: string; updatedAt: string }>
 > {

@@ -1,13 +1,25 @@
-import { getCounts, listChannelProgress } from "../db/store";
+import {
+  getCounts,
+  listChannelProgress,
+  searchChannels,
+  searchTranscripts,
+} from "../db/store";
 import type { ChannelProgress } from "../lib/types";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
-  const [counts, channels] = await Promise.all([
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string }>;
+}) {
+  const query = (await searchParams).q?.trim().slice(0, 200) ?? "";
+  const [counts, channels, videoResults, channelResults] = await Promise.all([
     getCounts(),
     listChannelProgress(25),
+    query ? searchTranscripts(query, 10) : Promise.resolve([]),
+    query ? searchChannels(query, 10) : Promise.resolve([]),
   ]);
   const activeChannels = channels.some((channel) =>
     ["queued", "discovering", "processing"].includes(channel.status),
@@ -15,6 +27,32 @@ export default async function Home() {
   return (
     <main>
       <h1>Transcript Registry</h1>
+
+      <section>
+        <h2>Search videos and YouTube channels</h2>
+        <form action="/" method="get">
+          <label htmlFor="library-search" hidden>
+            Search transcript videos and channels
+          </label>
+          <input
+            id="library-search"
+            name="q"
+            type="search"
+            defaultValue={query}
+            required
+            placeholder="Search this library"
+            aria-label="Search transcript videos and channels"
+          />
+          <button type="submit">Search</button>
+        </form>
+        {query ? (
+          <SearchResults
+            query={query}
+            videos={videoResults}
+            channels={channelResults}
+          />
+        ) : null}
+      </section>
 
       <section>
         <h2>Add a complete YouTube channel</h2>
@@ -41,7 +79,7 @@ export default async function Home() {
       </section>
 
       <section>
-        <h2>Add one video</h2>
+        <h2>Request one transcript on demand</h2>
         <form action="/api/add" method="post">
           <label htmlFor="url" hidden>
             YouTube URL
@@ -55,8 +93,12 @@ export default async function Home() {
             placeholder="https://www.youtube.com/watch?v=…"
             aria-label="YouTube URL"
           />
-          <button type="submit">Add transcript</button>
+          <button type="submit">Request transcript</button>
         </form>
+        <p className="muted">
+          Agents can use <code>/on-demand.json?url=YOUTUBE_URL</code> and poll
+          the returned job URL.
+        </p>
       </section>
 
       <p className="muted">
@@ -93,6 +135,69 @@ export default async function Home() {
       </section>
       {activeChannels ? <meta httpEquiv="refresh" content="15" /> : null}
     </main>
+  );
+}
+
+function SearchResults({
+  query,
+  videos,
+  channels,
+}: {
+  query: string;
+  videos: Awaited<ReturnType<typeof searchTranscripts>>;
+  channels: ChannelProgress[];
+}) {
+  return (
+    <div className="search-results">
+      <p>
+        {videos.length} videos and {channels.length} channels for “{query}”.
+      </p>
+      {videos.length ? (
+        <>
+          <h3>Transcript videos</h3>
+          <ol>
+            {videos.map((video) => (
+              <li key={video.providerId}>
+                <Link href={`/youtube/${video.providerId}`}>
+                  {video.title}
+                </Link>{" "}
+                <span className="muted">— {video.channel}</span>
+                <p>{video.snippet}</p>
+              </li>
+            ))}
+          </ol>
+        </>
+      ) : null}
+      {channels.length ? (
+        <>
+          <h3>YouTube channels</h3>
+          <ul>
+            {channels.map((channel) => (
+              <li key={channel.id}>
+                <Link href={`/channels/${channel.id}`}>
+                  {channel.channelName || channel.normalizedUrl}
+                </Link>{" "}
+                <span className="muted">
+                  — {channel.status}, {channel.progressPercent}%
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {!videos.length && !channels.length ? (
+        <p className="muted">
+          Nothing stored yet. Ask for an exact YouTube URL below or use the
+          machine search endpoint to queue topic discovery.
+        </p>
+      ) : null}
+      <p className="muted">
+        Agent results:{" "}
+        <a href={`/search.txt?q=${encodeURIComponent(query)}`}>text</a>
+        {" · "}
+        <a href={`/search.json?q=${encodeURIComponent(query)}`}>JSON</a>
+      </p>
+    </div>
   );
 }
 

@@ -8,7 +8,8 @@ Live site: https://transcript-registry.vercel.app
 ## How it works
 
 1. Search `/search.txt?q=your+topic`.
-2. Open a result such as `/youtube/VIDEO_ID.txt`.
+2. Results include matching transcript videos and tracked YouTube channels.
+   Open a video result such as `/youtube/VIDEO_ID.txt`.
 3. A zero-result search creates a topic-discovery job automatically. The
    response gives agents a `/topics/JOB_ID.json` URL to poll.
 4. A local worker discovers matching captioned Creative Commons videos and
@@ -24,6 +25,8 @@ Useful public URLs:
 
 - `/search.txt?q=topic`
 - `/search.json?q=topic`
+- `/on-demand.json?url=YOUTUBE_URL`
+- `/on-demand.txt?url=YOUTUBE_URL`
 - `/youtube/VIDEO_ID`
 - `/youtube/VIDEO_ID.txt`
 - `/youtube/VIDEO_ID.json`
@@ -31,6 +34,15 @@ Useful public URLs:
 - `/channels/CHANNEL_JOB_ID`
 - `/channels/CHANNEL_JOB_ID.json`
 - `/llms.txt`
+
+## Request one transcript on demand
+
+Open `/on-demand.json?url=YOUTUBE_URL`. If the transcript is already stored,
+Registry returns its HTML, text, and JSON URLs immediately. Otherwise it
+returns HTTP `202`, a job URL, and a suggested polling delay. The local worker
+claims the job, gets captions or runs permitted local ASR, and saves the
+result. Poll the job URL until it says `complete`, then open the returned
+transcript URL.
 
 ## Add a complete channel
 

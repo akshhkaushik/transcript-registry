@@ -43,7 +43,14 @@ ASR_ENGINE = os.environ.get(
     "ASR_ENGINE",
     "whisper-cpp" if WHISPER_CPP_BINARY and WHISPER_CPP_MODEL else "mlx",
 )
-ALLOW_AUDIO_FALLBACK = os.environ.get("ALLOW_AUDIO_FALLBACK", "0") == "1"
+AUDIO_FALLBACK_MODE = os.environ.get(
+    "ALLOW_AUDIO_FALLBACK", "permissioned"
+).strip().lower()
+PERMISSIONED_CHANNEL_IDS = {
+    value.strip()
+    for value in os.environ.get("PERMISSIONED_CHANNEL_IDS", "").split(",")
+    if value.strip()
+}
 POLL_SECONDS = max(3, int(os.environ.get("POLL_SECONDS", "15")))
 WORKER_ID = os.environ.get(
     "WORKER_ID", f"{socket.gethostname()}-{os.getpid()}"
@@ -226,12 +233,27 @@ def parse_timestamp(value: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
+def audio_fallback_allowed(info: dict[str, Any]) -> bool:
+    if AUDIO_FALLBACK_MODE in {"1", "true", "yes", "all"}:
+        return True
+    if AUDIO_FALLBACK_MODE not in {"permissioned", "licensed", "cc"}:
+        return False
+    license_name = str(info.get("license") or "").lower()
+    channel_id = str(info.get("channel_id") or "")
+    return (
+        "creative commons" in license_name
+        or "cc by" in license_name
+        or channel_id in PERMISSIONED_CHANNEL_IDS
+    )
+
+
 def transcribe_audio(
-    url: str, cwd: Path
+    url: str, cwd: Path, info: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], str]:
-    if not ALLOW_AUDIO_FALLBACK:
+    if not audio_fallback_allowed(info):
         raise RuntimeError(
-            "No captions found. Audio ASR is disabled until this source is permissioned."
+            "No captions found. Local ASR is limited to Creative Commons or "
+            "explicitly permissioned channels."
         )
     run(
         [
@@ -377,7 +399,7 @@ def process(job: dict[str, Any]) -> None:
         if captions:
             segments, source = captions
         else:
-            segments, source = transcribe_audio(job["sourceUrl"], cwd)
+            segments, source = transcribe_audio(job["sourceUrl"], cwd, info)
         transcript = build_transcript(job, info, segments, source)
         request_json(
             f"/api/worker/{job['id']}/complete", transcript, timeout=300

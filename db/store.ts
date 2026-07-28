@@ -268,6 +268,7 @@ export async function searchTranscripts(
   await ensureDatabase();
   const tokens = meaningfulTokens(rawQuery);
   if (!tokens.length) return [];
+  const safeLimit = Math.max(1, Math.min(limit, 50));
 
   const conditions = tokens.map(
     () =>
@@ -278,18 +279,29 @@ export async function searchTranscripts(
       SELECT * FROM transcripts
       WHERE ${conditions.join(" AND ")}
       ORDER BY updated_at DESC
-      LIMIT ?
+      LIMIT 200
     `)
-    .bind(...tokens, Math.max(1, Math.min(limit, 50)))
+    .bind(...tokens)
     .all<TranscriptRow>();
 
-  return rows.results.map((row) => {
-    const transcript = mapTranscript(row);
-    return {
+  return rows.results
+    .map((row) => {
+      const transcript = mapTranscript(row);
+      return {
+        transcript,
+        score: transcriptRelevance(transcript, tokens),
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        right.transcript.updatedAt.localeCompare(left.transcript.updatedAt),
+    )
+    .slice(0, safeLimit)
+    .map(({ transcript }) => ({
       ...transcript,
       snippet: makeSnippet(transcript.transcriptText, tokens),
-    };
-  });
+    }));
 }
 
 export async function listTranscriptIds(): Promise<
@@ -450,6 +462,34 @@ function safeJson<T>(value: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function transcriptRelevance(
+  transcript: TranscriptRecord,
+  tokens: string[],
+): number {
+  const phrase = tokens.join(" ");
+  const title = transcript.title.toLowerCase();
+  const channel = transcript.channel.toLowerCase();
+  const topics = transcript.topics.join(" ").toLowerCase();
+  const description = transcript.description.toLowerCase();
+  const body = transcript.transcriptText.toLowerCase();
+
+  let score = 0;
+  if (phrase.length > 2 && title.includes(phrase)) score += 500;
+  if (phrase.length > 2 && channel.includes(phrase)) score += 250;
+  if (phrase.length > 2 && topics.includes(phrase)) score += 150;
+  if (phrase.length > 2 && description.includes(phrase)) score += 75;
+  if (phrase.length > 2 && body.includes(phrase)) score += 10;
+
+  for (const token of tokens) {
+    if (title.includes(token)) score += 100;
+    if (channel.includes(token)) score += 50;
+    if (topics.includes(token)) score += 30;
+    if (description.includes(token)) score += 10;
+    if (body.includes(token)) score += 1;
+  }
+  return score;
 }
 
 function makeSnippet(text: string, tokens: string[]): string {

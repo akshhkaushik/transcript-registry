@@ -28,8 +28,8 @@ pip install mlx-whisper
 npm run worker
 ```
 
-`yt-dlp` and `ffmpeg` must be installed. Audio transcription is disabled by
-default; enable it only for videos you have permission to process.
+`yt-dlp` and `ffmpeg` must be installed. Audio transcription is limited by
+default to Creative Commons videos or channel IDs you explicitly allow.
 
 The launch corpus comes from the attributed CC-BY
 [YouTube-Commons dataset](https://huggingface.co/datasets/PleIAs/YouTube-Commons).

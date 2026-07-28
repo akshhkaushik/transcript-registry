@@ -1,30 +1,45 @@
 # Transcript Registry
 
-This is a public transcript service made for web-searching AI tools.
+A free public library of YouTube transcripts, built for ChatGPT, Claude, search
+engines, and people. No account is needed to read anything.
 
 Live site: https://transcript-registry.vercel.app
 
-People only paste a missing YouTube link. The central worker then:
+## How it works
 
-1. uses creator captions when available;
-2. otherwise uses automatic captions;
-3. when permitted, transcribes the audio locally with MLX Whisper or whisper.cpp;
-4. stores the result for everyone.
+1. Search `/search.txt?q=your+topic`.
+2. Open a result such as `/youtube/VIDEO_ID.txt`.
+3. If a video is missing, paste its YouTube link on the home page.
+4. A background worker gets existing captions first. If captions are missing
+   and the source is permitted, it can transcribe audio with MLX Whisper or
+   whisper.cpp.
+5. The transcript is saved in Neon and stays available as HTML, plain text,
+   and JSON.
 
-Every transcript is available as a normal page, plain text, and JSON. Search
-returns only real matches; unrelated queries return zero results.
+Useful public URLs:
 
-## Run it
+- `/search.txt?q=topic`
+- `/search.json?q=topic`
+- `/youtube/VIDEO_ID`
+- `/youtube/VIDEO_ID.txt`
+- `/youtube/VIDEO_ID.json`
+- `/llms.txt`
 
-Copy `.env.example` to `.env.worker` and fill in the public site address and
-worker secret. Start the website locally with:
+## Run the website locally
+
+Copy `.env.example` to `.env.local`. Add a PostgreSQL `DATABASE_URL` and two
+private random values for `WORKER_TOKEN` and `RATE_LIMIT_SALT`, then run:
 
 ```sh
 npm install
+npm run db:migrate
 npm run dev
 ```
 
-Run the owner-operated background worker separately:
+## Run a transcript worker
+
+The worker can run on any computer; it does not need to run on the web server.
+Copy `worker/.env.example` to `.env.worker`, use the same `WORKER_TOKEN`, then:
 
 ```sh
 python3 -m venv .venv
@@ -32,19 +47,5 @@ python3 -m venv .venv
 npm run worker
 ```
 
-Install `ffmpeg` and `whisper.cpp` separately if you want the permissioned
-audio fallback. MLX Whisper is optional. Captioned videos need only `yt-dlp`,
-which the requirements file installs.
-
-The launch corpus comes from the attributed CC-BY
-[YouTube-Commons dataset](https://huggingface.co/datasets/PleIAs/YouTube-Commons).
-
-## Useful URLs
-
-- `/search.txt?q=topic`
-- `/youtube/VIDEO_ID`
-- `/youtube/VIDEO_ID.txt`
-- `/youtube/VIDEO_ID.json`
-- `/llms.txt`
-
-Reading never requires an account.
+Captioned videos only need `yt-dlp`. For permitted audio transcription, install
+MLX Whisper on Apple Silicon or configure whisper.cpp.

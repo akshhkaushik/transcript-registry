@@ -1,70 +1,53 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { spawn } from "node:child_process";
+import { after, test } from "node:test";
 
-const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-const { default: worker } = await import(workerUrl.href);
-
-class Statement {
-  constructor(sql) {
-    this.sql = sql;
-  }
-  bind() {
-    return this;
-  }
-  async run() {
-    return { meta: { changes: 1 } };
-  }
-  async first() {
-    if (/count\(\*\)/i.test(this.sql)) return { count: 0 };
-    return null;
-  }
-  async all() {
-    return { results: [] };
-  }
-}
-
-const environment = {
-  ASSETS: {
-    fetch: async () => new Response("Not found", { status: 404 }),
+const port = 31_000 + (process.pid % 1_000);
+const baseUrl = `http://127.0.0.1:${port}`;
+let output = "";
+const server = spawn(
+  process.platform === "win32" ? "npm.cmd" : "npm",
+  ["run", "start", "--", "-p", String(port)],
+  {
+    cwd: new URL("..", import.meta.url),
+    env: { ...process.env, PORT: String(port) },
+    stdio: ["ignore", "pipe", "pipe"],
   },
-  DB: {
-    prepare: (sql) => new Statement(sql),
-    batch: async (statements) =>
-      Promise.all(statements.map((statement) => statement.run())),
-  },
-};
-const context = {
-  waitUntil() {},
-  passThroughOnException() {},
-};
+);
+server.stdout.on("data", (chunk) => {
+  output += chunk;
+});
+server.stderr.on("data", (chunk) => {
+  output += chunk;
+});
 
-async function fetch(path, init = {}) {
-  return worker.fetch(
-    new Request(`http://registry.test${path}`, init),
-    environment,
-    context,
-  );
-}
+after(() => {
+  server.kill("SIGTERM");
+});
+
+await waitForServer();
 
 test("renders only the minimal submission interface", async () => {
-  const response = await fetch("/");
+  const response = await request("/");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Transcript Registry/);
   assert.match(html, /action="\/api\/add"/);
   assert.match(html, /Add transcript/);
-  assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Browse categories/i);
+  assert.doesNotMatch(
+    html,
+    /codex-preview|react-loading-skeleton|Browse categories/i,
+  );
 });
 
 test("strict nonsense search returns zero results", async () => {
-  const response = await fetch("/search.txt?q=yo%20what%27s%20up");
+  const response = await request("/search.txt?q=yo%20what%27s%20up");
   assert.equal(response.status, 200);
   assert.match(await response.text(), /Results: 0/);
 });
 
 test("rejects a non-YouTube submission", async () => {
-  const response = await fetch("/api/add", {
+  const response = await request("/api/add", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -80,8 +63,8 @@ test("rejects a non-YouTube submission", async () => {
 
 test("publishes crawler rules and machine endpoint instructions", async () => {
   const [robots, llms] = await Promise.all([
-    fetch("/robots.txt").then((response) => response.text()),
-    fetch("/llms.txt").then((response) => response.text()),
+    request("/robots.txt").then((response) => response.text()),
+    request("/llms.txt").then((response) => response.text()),
   ]);
   assert.match(robots, /User-agent: OAI-SearchBot[\s\S]*Allow: \//);
   assert.match(robots, /User-agent: Claude-SearchBot[\s\S]*Allow: \//);
@@ -90,6 +73,38 @@ test("publishes crawler rules and machine endpoint instructions", async () => {
 });
 
 test("missing transcript has a real 404", async () => {
-  const response = await fetch("/youtube/abcdefghijk.txt");
+  const response = await request("/youtube/abcdefghijk.txt");
   assert.equal(response.status, 404);
 });
+
+test("publishes one known transcript as HTML, plain text, and JSON", async () => {
+  const [html, text, json] = await Promise.all([
+    request("/youtube/Txqe_CAD43c"),
+    request("/youtube/Txqe_CAD43c.txt"),
+    request("/youtube/Txqe_CAD43c.json"),
+  ]);
+  assert.equal(html.status, 200);
+  assert.match(await html.text(), /Mayo Clinic Explains Diabetes/);
+  assert.match(text.headers.get("content-type") ?? "", /^text\/plain/);
+  assert.match(await text.text(), /^Title: Mayo Clinic Explains Diabetes/m);
+  assert.match(json.headers.get("content-type") ?? "", /^application\/json/);
+  assert.equal((await json.json()).providerId, "Txqe_CAD43c");
+});
+
+function request(path, init) {
+  return fetch(`${baseUrl}${path}`, init);
+}
+
+async function waitForServer() {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (server.exitCode !== null) {
+      throw new Error(`Next.js exited before startup:\n${output}`);
+    }
+    try {
+      const response = await request("/api/health");
+      if (response.ok) return;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Next.js did not start:\n${output}`);
+}

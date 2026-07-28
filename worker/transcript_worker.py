@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Owner-operated transcript worker.
+"""Owner-operated discovery and transcript worker.
 
-It polls the public registry for jobs, prefers creator captions, falls back to
-automatic captions, and uses local MLX Whisper or whisper.cpp only when needed.
+It discovers Creative Commons captioned videos for missing topics, prefers
+creator captions, falls back to automatic captions, and uses local MLX Whisper
+or whisper.cpp only when needed and permitted.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -73,6 +75,9 @@ POLL_SECONDS = max(3, int(os.environ.get("POLL_SECONDS", "15")))
 WORKER_ID = os.environ.get(
     "WORKER_ID", f"{socket.gethostname()}-{os.getpid()}"
 )
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
+DISCOVERY_LANGUAGE = os.environ.get("DISCOVERY_LANGUAGE", "en")
+DISCOVERY_REGION = os.environ.get("DISCOVERY_REGION", "US")
 
 TIMESTAMP = re.compile(
     r"(?P<start>\d{2}:\d{2}(?::\d{2})?[\.,]\d{3})\s+-->\s+"
@@ -424,9 +429,97 @@ def process(job: dict[str, Any]) -> None:
         )
 
 
+def discover_with_youtube_api(query: str, limit: int) -> list[str]:
+    if not YOUTUBE_API_KEY:
+        return []
+    parameters = urllib.parse.urlencode(
+        {
+            "part": "snippet",
+            "type": "video",
+            "q": query,
+            "maxResults": min(limit, 25),
+            "videoCaption": "closedCaption",
+            "videoLicense": "creativeCommon",
+            "safeSearch": "moderate",
+            "relevanceLanguage": DISCOVERY_LANGUAGE,
+            "regionCode": DISCOVERY_REGION,
+            "key": YOUTUBE_API_KEY,
+        }
+    )
+    request = urllib.request.Request(
+        f"https://www.googleapis.com/youtube/v3/search?{parameters}",
+        headers={"User-Agent": "transcript-registry-worker/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return [
+        f"https://www.youtube.com/watch?v={item['id']['videoId']}"
+        for item in payload.get("items", [])
+        if isinstance(item.get("id"), dict) and item["id"].get("videoId")
+    ]
+
+
+def discover_with_ytdlp(query: str, limit: int) -> list[str]:
+    with tempfile.TemporaryDirectory(prefix="topic-discovery-") as directory:
+        output = run(
+            [
+                YT_DLP_BINARY,
+                "--dump-single-json",
+                "--flat-playlist",
+                "--skip-download",
+                "--no-warnings",
+                "--playlist-end",
+                str(limit),
+                f"ytsearch{limit}:{query}",
+            ],
+            Path(directory),
+            timeout=300,
+        )
+    payload = json.loads(output)
+    urls: list[str] = []
+    for item in payload.get("entries", []):
+        video_id = str(item.get("id") or "")
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            urls.append(f"https://www.youtube.com/watch?v={video_id}")
+    return urls
+
+
+def discover_topic(job: dict[str, Any]) -> list[str]:
+    query = str(job.get("query") or "").strip()
+    limit = max(1, min(int(job.get("targetCount") or 8), 25))
+    if YOUTUBE_API_KEY:
+        try:
+            urls = discover_with_youtube_api(query, limit)
+            if urls:
+                return urls
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            KeyError,
+            json.JSONDecodeError,
+        ) as error:
+            print(
+                f"YouTube API discovery failed; using yt-dlp: {error}",
+                flush=True,
+            )
+    return discover_with_ytdlp(query, limit)
+
+
+def process_topic(job: dict[str, Any]) -> None:
+    request_json(
+        f"/api/worker/topics/{job['id']}/complete",
+        {"videoUrls": discover_topic(job)},
+        timeout=180,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true", help="Process at most one job")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Process at most one transcript or topic-discovery job",
+    )
     parser.add_argument("--check", action="store_true", help="Validate dependencies")
     args = parser.parse_args()
 
@@ -441,20 +534,40 @@ def main() -> int:
     while True:
         response = request_json("/api/worker/claim", {"workerId": WORKER_ID})
         job = response.get("job")
-        if not job:
+        if job:
+            try:
+                process(job)
+                print(f"completed video {job['providerId']}", flush=True)
+            except Exception as error:  # noqa: BLE001
+                message = str(error)[:1000]
+                print(f"failed video {job['providerId']}: {message}", flush=True)
+                request_json(f"/api/worker/{job['id']}/fail", {"error": message})
             if args.once:
                 return 0
-            time.sleep(POLL_SECONDS)
             continue
-        try:
-            process(job)
-            print(f"completed {job['providerId']}", flush=True)
-        except Exception as error:  # noqa: BLE001
-            message = str(error)[:1000]
-            print(f"failed {job['providerId']}: {message}", flush=True)
-            request_json(f"/api/worker/{job['id']}/fail", {"error": message})
+
+        topic_response = request_json(
+            "/api/worker/topics/claim", {"workerId": WORKER_ID}
+        )
+        topic_job = topic_response.get("job")
+        if topic_job:
+            try:
+                process_topic(topic_job)
+                print(f"completed topic {topic_job['query']}", flush=True)
+            except Exception as error:  # noqa: BLE001
+                message = str(error)[:1000]
+                print(f"failed topic {topic_job['query']}: {message}", flush=True)
+                request_json(
+                    f"/api/worker/topics/{topic_job['id']}/fail",
+                    {"error": message},
+                )
+            if args.once:
+                return 0
+            continue
+
         if args.once:
             return 0
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":

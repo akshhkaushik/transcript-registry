@@ -48,3 +48,21 @@ export type IngestionJob = {
   claimedAt: string | null;
   completedAt: string | null;
 };
+
+export type TopicJob = {
+  id: string;
+  query: string;
+  normalizedQuery: string;
+  status: "queued" | "processing" | "complete" | "failed";
+  targetCount: number;
+  foundCount: number;
+  enqueuedCount: number;
+  availableCount: number;
+  attempts: number;
+  workerId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  claimedAt: string | null;
+  completedAt: string | null;
+};

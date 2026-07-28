@@ -41,7 +41,9 @@ test("renders only the minimal submission interface", async () => {
 });
 
 test("strict nonsense search returns zero results", async () => {
-  const response = await request("/search.txt?q=yo%20what%27s%20up");
+  const response = await request(
+    "/search.txt?q=yo%20what%27s%20up&discover=0",
+  );
   assert.equal(response.status, 200);
   assert.match(await response.text(), /Results: 0/);
 });

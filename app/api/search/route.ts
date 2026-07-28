@@ -17,7 +17,14 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const query = url.searchParams.get("q")?.trim() ?? "";
-  const results = query ? await searchTranscripts(query) : [];
+  const limit = Math.max(
+    1,
+    Math.min(
+      Number.parseInt(url.searchParams.get("limit") ?? "10", 10) || 10,
+      50,
+    ),
+  );
+  const results = query ? await searchTranscripts(query, limit) : [];
   const discovery = await discoveryForMiss(request, query, results.length);
   const body = {
     query,

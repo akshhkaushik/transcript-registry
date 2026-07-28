@@ -442,44 +442,23 @@ export async function searchTranscripts(
   const tokens = meaningfulTokens(rawQuery);
   if (!tokens.length) return [];
   const safeLimit = Math.max(1, Math.min(limit, 50));
-  const document = sql<string>`concat_ws(
-    ' ',
-    ${transcripts.title},
-    ${transcripts.channel},
-    ${transcripts.description},
-    ${transcripts.topicsJson},
-    ${transcripts.transcriptText}
-  )`;
-  const conditions = tokens.map(
-    (token) => sql`${document} ILIKE ${`%${token}%`}`,
-  );
+  const textSearchQuery = tokens.join(" ");
+  const vector = sql`"transcripts"."search_vector"`;
+  const query = sql`plainto_tsquery('english', ${textSearchQuery})`;
   const rows = await getDb()
     .select()
     .from(transcripts)
-    .where(and(...conditions))
-    .orderBy(desc(transcripts.updatedAt))
-    .limit(200);
+    .where(sql`${vector} @@ ${query}`)
+    .orderBy(sql`ts_rank(${vector}, ${query}) DESC`, desc(transcripts.updatedAt))
+    .limit(safeLimit);
 
-  return rows
-    .map((row) => {
-      const transcript = mapTranscript(row);
-      return {
-        transcript,
-        score: transcriptRelevance(transcript, tokens),
-      };
-    })
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        (right.transcript.updatedAt ?? "").localeCompare(
-          left.transcript.updatedAt ?? "",
-        ),
-    )
-    .slice(0, safeLimit)
-    .map(({ transcript }) => ({
+  return rows.map((row) => {
+    const transcript = mapTranscript(row);
+    return {
       ...transcript,
       snippet: makeSnippet(transcript.transcriptText, tokens),
-    }));
+    };
+  });
 }
 
 export async function listTranscriptIds(): Promise<
@@ -689,34 +668,6 @@ function safeJson<T>(value: string, fallback: T): T {
   } catch {
     return fallback;
   }
-}
-
-function transcriptRelevance(
-  transcript: TranscriptRecord,
-  tokens: string[],
-): number {
-  const phrase = tokens.join(" ");
-  const title = transcript.title.toLowerCase();
-  const channel = transcript.channel.toLowerCase();
-  const topics = transcript.topics.join(" ").toLowerCase();
-  const description = transcript.description.toLowerCase();
-  const body = transcript.transcriptText.toLowerCase();
-
-  let score = 0;
-  if (phrase.length > 2 && title.includes(phrase)) score += 500;
-  if (phrase.length > 2 && channel.includes(phrase)) score += 250;
-  if (phrase.length > 2 && topics.includes(phrase)) score += 150;
-  if (phrase.length > 2 && description.includes(phrase)) score += 75;
-  if (phrase.length > 2 && body.includes(phrase)) score += 10;
-
-  for (const token of tokens) {
-    if (title.includes(token)) score += 100;
-    if (channel.includes(token)) score += 50;
-    if (topics.includes(token)) score += 30;
-    if (description.includes(token)) score += 10;
-    if (body.includes(token)) score += 1;
-  }
-  return score;
 }
 
 function makeSnippet(text: string, tokens: string[]): string {

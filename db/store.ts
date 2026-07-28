@@ -10,15 +10,17 @@ import {
 } from "drizzle-orm";
 import type {
   IngestionJob,
+  TopicJob,
   TranscriptRecord,
   TranscriptSegment,
 } from "../lib/types";
 import { getDb } from "./index";
-import { jobs, submissionEvents, transcripts } from "./schema";
+import { jobs, submissionEvents, topicJobs, transcripts } from "./schema";
 import { ensureDatabase } from "./runtime";
 
 type TranscriptRow = typeof transcripts.$inferSelect;
 type JobRow = typeof jobs.$inferSelect;
+type TopicJobRow = typeof topicJobs.$inferSelect;
 
 const STOP_WORDS = new Set([
   "a",
@@ -261,6 +263,177 @@ export async function failJob(id: string, error: string): Promise<void> {
     .where(eq(jobs.id, id));
 }
 
+export async function getTopicJob(id: string): Promise<TopicJob | null> {
+  await ensureDatabase();
+  const [row] = await getDb()
+    .select()
+    .from(topicJobs)
+    .where(eq(topicJobs.id, id))
+    .limit(1);
+  return row ? mapTopicJob(row) : null;
+}
+
+export async function getTopicJobForQuery(
+  query: string,
+): Promise<TopicJob | null> {
+  await ensureDatabase();
+  const normalizedQuery = normalizeTopicQuery(query);
+  if (!normalizedQuery) return null;
+  const [row] = await getDb()
+    .select()
+    .from(topicJobs)
+    .where(eq(topicJobs.normalizedQuery, normalizedQuery))
+    .limit(1);
+  return row ? mapTopicJob(row) : null;
+}
+
+export async function createOrRefreshTopicJob(
+  query: string,
+  targetCount = 8,
+  force = false,
+): Promise<{ job: TopicJob; created: boolean; refreshed: boolean }> {
+  await ensureDatabase();
+  const cleanQuery = query.replace(/\s+/g, " ").trim().slice(0, 200);
+  const normalizedQuery = normalizeTopicQuery(cleanQuery);
+  if (!normalizedQuery) throw new Error("Topic query is too broad or empty");
+  const safeTarget = Math.max(1, Math.min(targetCount, 25));
+  const database = getDb();
+  const [created] = await database
+    .insert(topicJobs)
+    .values({
+      id: crypto.randomUUID(),
+      query: cleanQuery,
+      normalizedQuery,
+      targetCount: safeTarget,
+    })
+    .onConflictDoNothing({ target: topicJobs.normalizedQuery })
+    .returning();
+  if (created) {
+    return { job: mapTopicJob(created), created: true, refreshed: false };
+  }
+
+  const existing = await getTopicJobForQuery(cleanQuery);
+  if (!existing) throw new Error("Topic job was not created");
+  const refreshBefore = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const staleComplete =
+    existing.status === "complete" &&
+    Date.parse(existing.updatedAt) < refreshBefore;
+  const refreshable =
+    existing.status === "failed" || staleComplete || force;
+  if (!refreshable || existing.status === "processing") {
+    return { job: existing, created: false, refreshed: false };
+  }
+
+  const [refreshed] = await database
+    .update(topicJobs)
+    .set({
+      query: cleanQuery,
+      status: "queued",
+      targetCount: safeTarget,
+      foundCount: 0,
+      enqueuedCount: 0,
+      availableCount: 0,
+      attempts: 0,
+      workerId: null,
+      error: null,
+      claimedAt: null,
+      completedAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(topicJobs.id, existing.id))
+    .returning();
+  if (!refreshed) throw new Error("Topic job was not refreshed");
+  return { job: mapTopicJob(refreshed), created: false, refreshed: true };
+}
+
+export async function claimTopicJob(
+  workerId: string,
+): Promise<TopicJob | null> {
+  await ensureDatabase();
+  const database = getDb();
+  const staleBefore = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  await database
+    .update(topicJobs)
+    .set({
+      status: "queued",
+      workerId: null,
+      claimedAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(topicJobs.status, "processing"),
+        lt(topicJobs.claimedAt, staleBefore),
+        lt(topicJobs.attempts, 3),
+      ),
+    );
+  const [candidate] = await database
+    .select({ id: topicJobs.id })
+    .from(topicJobs)
+    .where(and(eq(topicJobs.status, "queued"), lt(topicJobs.attempts, 3)))
+    .orderBy(asc(topicJobs.createdAt))
+    .limit(1);
+  if (!candidate) return null;
+  const [claimed] = await database
+    .update(topicJobs)
+    .set({
+      status: "processing",
+      workerId,
+      attempts: sql`${topicJobs.attempts} + 1`,
+      claimedAt: sql`CURRENT_TIMESTAMP`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(eq(topicJobs.id, candidate.id), eq(topicJobs.status, "queued")),
+    )
+    .returning();
+  return claimed ? mapTopicJob(claimed) : null;
+}
+
+export async function completeTopicJob(
+  id: string,
+  counts: {
+    found: number;
+    enqueued: number;
+    available: number;
+  },
+): Promise<void> {
+  await ensureDatabase();
+  const [updated] = await getDb()
+    .update(topicJobs)
+    .set({
+      status: "complete",
+      foundCount: Math.max(0, counts.found),
+      enqueuedCount: Math.max(0, counts.enqueued),
+      availableCount: Math.max(0, counts.available),
+      error: null,
+      completedAt: sql`CURRENT_TIMESTAMP`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(topicJobs.id, id))
+    .returning({ id: topicJobs.id });
+  if (!updated) throw new Error("Topic job not found");
+}
+
+export async function failTopicJob(
+  id: string,
+  error: string,
+): Promise<void> {
+  await ensureDatabase();
+  const job = await getTopicJob(id);
+  if (!job) throw new Error("Topic job not found");
+  await getDb()
+    .update(topicJobs)
+    .set({
+      status: job.attempts >= 3 ? "failed" : "queued",
+      error: error.slice(0, 1000),
+      workerId: null,
+      claimedAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(eq(topicJobs.id, id));
+}
+
 export async function searchTranscripts(
   rawQuery: string,
   limit = 10,
@@ -328,10 +501,18 @@ export async function getCounts(): Promise<{
   transcripts: number;
   queued: number;
   processing: number;
+  topicQueued: number;
+  topicProcessing: number;
 }> {
   await ensureDatabase();
   const database = getDb();
-  const [[transcriptCount], [queuedCount], [processingCount]] =
+  const [
+    [transcriptCount],
+    [queuedCount],
+    [processingCount],
+    [topicQueuedCount],
+    [topicProcessingCount],
+  ] =
     await Promise.all([
       database.select({ value: count() }).from(transcripts),
       database
@@ -342,11 +523,21 @@ export async function getCounts(): Promise<{
         .select({ value: count() })
         .from(jobs)
         .where(eq(jobs.status, "processing")),
+      database
+        .select({ value: count() })
+        .from(topicJobs)
+        .where(eq(topicJobs.status, "queued")),
+      database
+        .select({ value: count() })
+        .from(topicJobs)
+        .where(eq(topicJobs.status, "processing")),
     ]);
   return {
     transcripts: transcriptCount?.value ?? 0,
     queued: queuedCount?.value ?? 0,
     processing: processingCount?.value ?? 0,
+    topicQueued: topicQueuedCount?.value ?? 0,
+    topicProcessing: topicProcessingCount?.value ?? 0,
   };
 }
 
@@ -390,6 +581,10 @@ export function meaningfulTokens(query: string): string[] {
         ?.filter((token) => token.length > 1 && !STOP_WORDS.has(token)) ?? [],
     ),
   ].slice(0, 8);
+}
+
+export function normalizeTopicQuery(query: string): string {
+  return meaningfulTokens(query).join(" ");
 }
 
 function validateTranscript(value: TranscriptRecord): TranscriptRecord {
@@ -458,6 +653,26 @@ function mapJob(row: JobRow): IngestionJob {
     providerId: row.providerId,
     sourceUrl: row.sourceUrl,
     status: row.status as IngestionJob["status"],
+    attempts: row.attempts,
+    workerId: row.workerId,
+    error: row.error,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    claimedAt: row.claimedAt,
+    completedAt: row.completedAt,
+  };
+}
+
+function mapTopicJob(row: TopicJobRow): TopicJob {
+  return {
+    id: row.id,
+    query: row.query,
+    normalizedQuery: row.normalizedQuery,
+    status: row.status as TopicJob["status"],
+    targetCount: row.targetCount,
+    foundCount: row.foundCount,
+    enqueuedCount: row.enqueuedCount,
+    availableCount: row.availableCount,
     attempts: row.attempts,
     workerId: row.workerId,
     error: row.error,

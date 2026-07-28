@@ -66,6 +66,31 @@ export const jobs = pgTable(
   ],
 );
 
+export const topicJobs = pgTable(
+  "topic_jobs",
+  {
+    id: text("id").primaryKey(),
+    query: text("query").notNull(),
+    normalizedQuery: text("normalized_query").notNull(),
+    status: text("status").notNull().default("queued"),
+    targetCount: integer("target_count").notNull().default(8),
+    foundCount: integer("found_count").notNull().default(0),
+    enqueuedCount: integer("enqueued_count").notNull().default(0),
+    availableCount: integer("available_count").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    workerId: text("worker_id"),
+    error: text("error"),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
+    updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
+    claimedAt: timestampColumn("claimed_at"),
+    completedAt: timestampColumn("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("topic_jobs_normalized_query_idx").on(table.normalizedQuery),
+    index("topic_jobs_status_created_idx").on(table.status, table.createdAt),
+  ],
+);
+
 export const submissionEvents = pgTable(
   "submission_events",
   {

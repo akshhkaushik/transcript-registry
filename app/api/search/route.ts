@@ -1,5 +1,16 @@
-import { searchTranscripts } from "../../../db/store";
-import { jsonResponse, textResponse } from "../../../lib/http";
+import {
+  checkAndRecordSubmission,
+  createOrRefreshTopicJob,
+  getTopicJobForQuery,
+  meaningfulTokens,
+  searchTranscripts,
+} from "../../../db/store";
+import {
+  clientHash,
+  jsonResponse,
+  textResponse,
+} from "../../../lib/http";
+import type { TopicJob } from "../../../lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +18,7 @@ export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const query = url.searchParams.get("q")?.trim() ?? "";
   const results = query ? await searchTranscripts(query) : [];
+  const discovery = await discoveryForMiss(request, query, results.length);
   const body = {
     query,
     count: results.length,
@@ -20,6 +32,15 @@ export async function GET(request: Request): Promise<Response> {
       text: `/youtube/${result.providerId}.txt`,
       snippet: result.snippet,
     })),
+    discovery:
+      discovery && "job" in discovery
+        ? {
+            id: discovery.job.id,
+            status: discovery.job.status,
+            statusUrl: `/topics/${discovery.job.id}.json`,
+            retryAfterSeconds: 20,
+          }
+        : discovery,
   };
 
   if (url.searchParams.get("format") === "txt") {
@@ -34,12 +55,64 @@ export async function GET(request: Request): Promise<Response> {
         "",
       );
     }
+    if (discovery && "job" in discovery) {
+      lines.push(
+        `Discovery: ${discovery.job.status}`,
+        `Discovery job: ${url.origin}/topics/${discovery.job.id}.json`,
+        `Retry search: ${url.origin}/search.txt?q=${encodeURIComponent(query)}`,
+        "",
+      );
+    } else if (discovery?.status === "rate-limited") {
+      lines.push(
+        "Discovery: rate-limited",
+        "Retry this search later.",
+        "",
+      );
+    }
     return textResponse(`${lines.join("\n")}\n`, {
-      headers: { "Cache-Control": "public, max-age=60" },
+      headers: {
+        "Cache-Control": results.length
+          ? "public, max-age=60"
+          : "no-store",
+      },
     });
   }
 
   return jsonResponse(body, {
-    headers: { "Cache-Control": "public, max-age=60" },
+    headers: {
+      "Cache-Control": results.length ? "public, max-age=60" : "no-store",
+    },
   });
+}
+
+async function discoveryForMiss(
+  request: Request,
+  query: string,
+  resultCount: number,
+): Promise<
+  | { job: TopicJob }
+  | { status: "rate-limited" }
+  | null
+> {
+  const url = new URL(request.url);
+  if (
+    resultCount > 0 ||
+    url.searchParams.get("discover") === "0" ||
+    !meaningfulTokens(query).length ||
+    query.length > 200
+  ) {
+    return null;
+  }
+  const existing = await getTopicJobForQuery(query);
+  if (existing) return { job: existing };
+  if (
+    !(await checkAndRecordSubmission(
+      await clientHash(request),
+      20,
+    ))
+  ) {
+    return { status: "rate-limited" };
+  }
+  const { job } = await createOrRefreshTopicJob(query);
+  return { job };
 }

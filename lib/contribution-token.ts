@@ -1,5 +1,5 @@
 const TOKEN_VERSION = 1;
-const TOKEN_TTL_SECONDS = 2 * 60 * 60;
+const TOKEN_TTL_SECONDS = 12 * 60 * 60;
 
 type ContributionTokenPayload = {
   version: number;

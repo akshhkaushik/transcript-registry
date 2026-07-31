@@ -18,9 +18,10 @@ Live site: https://transcript-registry.vercel.app
 5. The background worker gets existing captions first. If captions are missing
    and the source is permitted, it can transcribe audio with MLX Whisper or
    whisper.cpp.
-6. A coding agent can instead run `/contribute.txt` on its user's computer.
-   That computer gets captions or runs Whisper, uploads only the transcript,
-   and deletes temporary audio.
+6. A user can open `/contribute` to run Whisper entirely in a browser worker,
+   with resumable local checkpoints, or a coding agent can run
+   `/contribute.txt` through the existing native helper.
+   Both paths upload only the transcript.
 7. The transcript is saved in Neon and stays available to everyone as HTML,
    plain text, and JSON.
 
@@ -31,6 +32,7 @@ Useful public URLs:
 - `/on-demand.json?url=YOUTUBE_URL`
 - `/on-demand.txt?url=YOUTUBE_URL`
 - `/contribute.txt`
+- `/contribute`
 - `/youtube/VIDEO_ID`
 - `/youtube/VIDEO_ID.txt`
 - `/youtube/VIDEO_ID.json`
@@ -49,6 +51,18 @@ result. Poll the job URL until it says `complete`, then open the returned
 transcript URL.
 
 ## Use the requesting user's computer
+
+Open `/contribute` to select a matching local audio/video file. Registry
+reserves the YouTube job, copies the file into origin-private browser storage,
+and runs Whisper in a dedicated worker. WebGPU is preferred and WASM is the
+fallback. Progress and ETA are published without transcript text; 30-second
+local checkpoints allow pause and resume. Cancellation and successful
+completion delete the local copy.
+
+The browser route is for permissioned public contributions, not private
+recording storage. The selected media is never uploaded. See the
+[browser-local transcription RFC](docs/browser-local-transcription.md) for the
+event model, security boundary, failure recovery, and platform limitations.
 
 Coding agents such as Codex or Claude Code can avoid using the site owner's
 computer. Open `/contribute.txt` and follow the command there. The local helper:

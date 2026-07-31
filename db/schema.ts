@@ -86,6 +86,13 @@ export const jobs = pgTable(
     workerId: text("worker_id"),
     error: text("error"),
     processingSeconds: integer("processing_seconds"),
+    progressPercent: integer("progress_percent").notNull().default(0),
+    processedSeconds: integer("processed_seconds").notNull().default(0),
+    totalSeconds: integer("total_seconds"),
+    etaSeconds: integer("eta_seconds"),
+    progressStage: text("progress_stage"),
+    progressUpdatedAt: timestampColumn("progress_updated_at"),
+    latestEventSequence: integer("latest_event_sequence").notNull().default(0),
     createdAt: timestampColumn("created_at").notNull().defaultNow(),
     updatedAt: timestampColumn("updated_at").notNull().defaultNow(),
     claimedAt: timestampColumn("claimed_at"),
@@ -94,6 +101,27 @@ export const jobs = pgTable(
   (table) => [
     uniqueIndex("jobs_provider_video_idx").on(table.provider, table.providerId),
     index("jobs_status_created_idx").on(table.status, table.createdAt),
+  ],
+);
+
+export const jobEvents = pgTable(
+  "job_events",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    type: text("type").notNull(),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    createdAt: timestampColumn("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("job_events_job_sequence_idx").on(
+      table.jobId,
+      table.sequence,
+    ),
+    index("job_events_job_created_idx").on(table.jobId, table.createdAt),
   ],
 );
 

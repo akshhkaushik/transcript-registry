@@ -11,6 +11,7 @@ const {
 const { validateContributedTranscript } = await import(
   "../lib/contribution.ts"
 );
+const { parseContributionJobEvent } = await import("../lib/job-events.ts");
 
 test("contribution grants are job-scoped and reject tampering", async () => {
   const grant = await createContributionGrant({
@@ -68,6 +69,36 @@ test("local ASR requires explicit rights confirmation", () => {
   );
   assert.doesNotThrow(() =>
     validateContributedTranscript(transcript, { rightsConfirmed: true }),
+  );
+});
+
+test("browser progress events are bounded and omit transcript content", () => {
+  const event = parseContributionJobEvent({
+    id: "event_12345678",
+    sequence: 4,
+    type: "job.progress",
+    payload: {
+      stage: "transcribing",
+      progressPercent: 42.5,
+      processedSeconds: 120,
+      totalSeconds: 300,
+      etaSeconds: 180,
+      backend: "webgpu",
+      transcriptText: "must remain on the device",
+    },
+  });
+  assert.equal(event.sequence, 4);
+  assert.equal(event.payload.progressPercent, 42.5);
+  assert.equal("transcriptText" in event.payload, false);
+  assert.throws(
+    () =>
+      parseContributionJobEvent({
+        id: "event_12345678",
+        sequence: 5,
+        type: "job.progress",
+        payload: { progressPercent: 101 },
+      }),
+    /progressPercent/,
   );
 });
 

@@ -85,6 +85,18 @@ export async function POST(request: Request): Promise<Response> {
       { headers: { "Cache-Control": "public, max-age=60" } },
     );
   }
+  if (!reservation.reserved) {
+    return jsonResponse(
+      {
+        status: "busy",
+        jobId: job.id,
+        videoId: source.providerId,
+        error:
+          "Another local contributor currently owns this transcription job.",
+      },
+      { status: 409, headers: { "Cache-Control": "no-store" } },
+    );
+  }
 
   return jsonResponse(
     {
@@ -98,6 +110,10 @@ export async function POST(request: Request): Promise<Response> {
       expiresAt: grant.expiresAt,
       upload: `${requestUrl.origin}/api/contributions/${job.id}/complete`,
       release: `${requestUrl.origin}/api/contributions/${job.id}/release`,
+      events: `${requestUrl.origin}/api/contributions/${job.id}/events`,
+      refresh: `${requestUrl.origin}/api/contributions/${job.id}/refresh`,
+      publicEvents: `${requestUrl.origin}/api/jobs/${job.id}/events`,
+      eventCursor: reservation.job.latestEventSequence,
       afterCompletion: paths,
     },
     { status: 201, headers: { "Cache-Control": "no-store" } },

@@ -22,6 +22,8 @@ export async function GET(request: Request): Promise<Response> {
       "An on-demand miss returns HTTP 202 with a job URL. Poll it until complete, then open the transcript text URL.",
       `Local contribution instructions: ${origin}/contribute.txt`,
       `Local contribution helper: ${origin}/contribute.py`,
+      `Browser-local transcription: ${origin}/contribute`,
+      "The browser route keeps selected media on-device, reports content-free progress, and publishes only the permissioned final transcript.",
       "Coding agents with a local terminal should follow contribute.txt so captions or Whisper run on the user's computer. The helper prints only status and URLs, uploads no audio, and stores the result for everyone.",
       `Submit missing video: POST ${origin}/api/add with {"url":"YOUTUBE_URL"}`,
       `Submit complete channel: POST ${origin}/api/channels with {"url":"YOUTUBE_CHANNEL_URL"}`,

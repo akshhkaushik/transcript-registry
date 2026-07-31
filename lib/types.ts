@@ -48,10 +48,44 @@ export type IngestionJob = {
   workerId: string | null;
   error: string | null;
   processingSeconds: number | null;
+  progressPercent: number;
+  processedSeconds: number;
+  totalSeconds: number | null;
+  etaSeconds: number | null;
+  progressStage: string | null;
+  progressUpdatedAt: string | null;
+  latestEventSequence: number;
   createdAt: string;
   updatedAt: string;
   claimedAt: string | null;
   completedAt: string | null;
+};
+
+export type JobEventType =
+  | "job.accepted"
+  | "model.loading"
+  | "job.progress"
+  | "job.checkpointed"
+  | "job.paused"
+  | "job.resumed"
+  | "job.cancelled"
+  | "job.failed";
+
+export type JobEvent = {
+  id: string;
+  jobId: string;
+  sequence: number;
+  type: JobEventType;
+  payload: {
+    stage?: string;
+    progressPercent?: number;
+    processedSeconds?: number;
+    totalSeconds?: number;
+    etaSeconds?: number | null;
+    backend?: "webgpu" | "wasm";
+    message?: string;
+  };
+  createdAt: string;
 };
 
 export type ChannelJob = {

@@ -20,6 +20,7 @@ import type {
   ChannelProgress,
   ChannelSearchJob,
   IngestionJob,
+  JobEvent,
   TopicJob,
   TranscriptRecord,
   TranscriptSegment,
@@ -29,6 +30,7 @@ import {
   channelJobs,
   channelSearchJobs,
   channelVideos,
+  jobEvents,
   jobs,
   submissionEvents,
   topicJobs,
@@ -38,6 +40,7 @@ import { ensureDatabase } from "./runtime";
 
 type TranscriptRow = typeof transcripts.$inferSelect;
 type JobRow = typeof jobs.$inferSelect;
+type JobEventRow = typeof jobEvents.$inferSelect;
 type ChannelJobRow = typeof channelJobs.$inferSelect;
 type ChannelSearchJobRow = typeof channelSearchJobs.$inferSelect;
 type TopicJobRow = typeof topicJobs.$inferSelect;
@@ -514,25 +517,150 @@ export async function getJob(id: string): Promise<IngestionJob | null> {
   return row ? mapJob(row) : null;
 }
 
+export async function recordContributionJobEvent(
+  id: string,
+  reservationId: string,
+  event: Omit<JobEvent, "jobId" | "createdAt">,
+): Promise<{ event: JobEvent; inserted: boolean }> {
+  await ensureDatabase();
+  const database = getDb();
+  const workerId = `contributor:${reservationId}`;
+  const [ownedJob] = await database
+    .select({ id: jobs.id, latestEventSequence: jobs.latestEventSequence })
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.id, id),
+        eq(jobs.status, "processing"),
+        eq(jobs.workerId, workerId),
+      ),
+    )
+    .limit(1);
+  if (!ownedJob) {
+    throw new Error("Contribution reservation is no longer active");
+  }
+  if (event.sequence < 1) throw new Error("Event sequence must be positive");
+
+  const [inserted] = await database
+    .insert(jobEvents)
+    .values({
+      id: event.id,
+      jobId: id,
+      sequence: event.sequence,
+      type: event.type,
+      payloadJson: JSON.stringify(event.payload),
+    })
+    .onConflictDoNothing()
+    .returning();
+
+  if (!inserted) {
+    const [existing] = await database
+      .select()
+      .from(jobEvents)
+      .where(
+        and(
+          eq(jobEvents.jobId, id),
+          eq(jobEvents.sequence, event.sequence),
+        ),
+      )
+      .limit(1);
+    if (!existing) throw new Error("Event conflicts with an existing event");
+    return { event: mapJobEvent(existing), inserted: false };
+  }
+
+  const progressPercent = event.payload.progressPercent;
+  const processedSeconds = event.payload.processedSeconds;
+  const totalSeconds = event.payload.totalSeconds;
+  const etaSeconds = event.payload.etaSeconds;
+  await database
+    .update(jobs)
+    .set({
+      latestEventSequence: event.sequence,
+      progressStage: event.payload.stage?.slice(0, 100) ?? event.type,
+      progressPercent:
+        progressPercent == null
+          ? undefined
+          : Math.max(0, Math.min(100, Math.round(progressPercent))),
+      processedSeconds:
+        processedSeconds == null
+          ? undefined
+          : Math.max(0, Math.round(processedSeconds)),
+      totalSeconds:
+        totalSeconds == null ? undefined : Math.max(0, Math.round(totalSeconds)),
+      etaSeconds:
+        etaSeconds === undefined
+          ? undefined
+          : etaSeconds === null
+            ? null
+            : Math.max(0, Math.round(etaSeconds)),
+      progressUpdatedAt: sql`CURRENT_TIMESTAMP`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(jobs.id, id),
+        eq(jobs.workerId, workerId),
+        lt(jobs.latestEventSequence, event.sequence),
+      ),
+    );
+  return { event: mapJobEvent(inserted), inserted: true };
+}
+
+export async function listJobEvents(
+  id: string,
+  afterSequence = 0,
+  limit = 100,
+): Promise<JobEvent[]> {
+  await ensureDatabase();
+  const rows = await getDb()
+    .select()
+    .from(jobEvents)
+    .where(
+      and(
+        eq(jobEvents.jobId, id),
+        gte(jobEvents.sequence, Math.max(0, Math.floor(afterSequence)) + 1),
+      ),
+    )
+    .orderBy(asc(jobEvents.sequence))
+    .limit(Math.max(1, Math.min(200, Math.floor(limit))));
+  return rows.map(mapJobEvent);
+}
+
 export async function reserveJobForContribution(
   id: string,
   workerId: string,
 ): Promise<{ job: IngestionJob; reserved: boolean }> {
   await ensureDatabase();
   const database = getDb();
+  const staleContributionBefore = new Date(
+    Date.now() - 12 * 60 * 60 * 1000,
+  ).toISOString();
   const [reserved] = await database
     .update(jobs)
     .set({
       status: "processing",
       workerId: workerId.slice(0, 200),
       error: null,
+      progressPercent: 0,
+      processedSeconds: 0,
+      totalSeconds: null,
+      etaSeconds: null,
+      progressStage: "reserved",
+      progressUpdatedAt: sql`CURRENT_TIMESTAMP`,
       claimedAt: sql`CURRENT_TIMESTAMP`,
       updatedAt: sql`CURRENT_TIMESTAMP`,
     })
     .where(
       and(
         eq(jobs.id, id),
-        inArray(jobs.status, ["queued", "failed"]),
+        or(
+          inArray(jobs.status, ["queued", "failed"]),
+          and(
+            eq(jobs.status, "processing"),
+            like(jobs.workerId, "contributor:%"),
+            lt(jobs.claimedAt, staleContributionBefore),
+          ),
+        ),
       ),
     )
     .returning();
@@ -546,6 +674,31 @@ export async function reserveJobForContribution(
   const job = await getJob(id);
   if (!job) throw new Error("Job not found");
   return { job, reserved: false };
+}
+
+export async function rotateContributionReservation(
+  id: string,
+  previousReservationId: string,
+  nextReservationId: string,
+): Promise<IngestionJob> {
+  await ensureDatabase();
+  const [rotated] = await getDb()
+    .update(jobs)
+    .set({
+      workerId: `contributor:${nextReservationId}`,
+      claimedAt: sql`CURRENT_TIMESTAMP`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(jobs.id, id),
+        eq(jobs.status, "processing"),
+        eq(jobs.workerId, `contributor:${previousReservationId}`),
+      ),
+    )
+    .returning();
+  if (!rotated) throw new Error("Contribution reservation is no longer active");
+  return mapJob(rotated);
 }
 
 export async function releaseContributionJob(
@@ -562,6 +715,12 @@ export async function releaseContributionJob(
       workerId: null,
       claimedAt: null,
       error: error?.slice(0, 1000) || null,
+      progressPercent: 0,
+      processedSeconds: 0,
+      totalSeconds: null,
+      progressStage: "queued",
+      etaSeconds: null,
+      progressUpdatedAt: sql`CURRENT_TIMESTAMP`,
       updatedAt: sql`CURRENT_TIMESTAMP`,
     })
     .where(
@@ -597,7 +756,7 @@ export async function claimJobs(
   const safeLimit = Math.max(1, Math.min(limit, 10));
   const staleBefore = new Date(Date.now() - 45 * 60 * 1000).toISOString();
   const staleContributionBefore = new Date(
-    Date.now() - 2 * 60 * 60 * 1000,
+    Date.now() - 12 * 60 * 60 * 1000,
   ).toISOString();
 
   await database
@@ -606,6 +765,12 @@ export async function claimJobs(
       status: "queued",
       workerId: null,
       claimedAt: null,
+      progressPercent: 0,
+      processedSeconds: 0,
+      totalSeconds: null,
+      etaSeconds: null,
+      progressStage: "queued",
+      progressUpdatedAt: sql`CURRENT_TIMESTAMP`,
       updatedAt: sql`CURRENT_TIMESTAMP`,
     })
     .where(
@@ -698,6 +863,12 @@ export async function completeJob(
           ? job.processingSeconds
           : Math.max(0, Math.round(processingSeconds)),
       completedAt: sql`CURRENT_TIMESTAMP`,
+      progressPercent: 100,
+      processedSeconds: transcript.durationSeconds ?? job.processedSeconds,
+      totalSeconds: transcript.durationSeconds ?? job.totalSeconds,
+      etaSeconds: 0,
+      progressStage: "complete",
+      progressUpdatedAt: sql`CURRENT_TIMESTAMP`,
       updatedAt: sql`CURRENT_TIMESTAMP`,
     })
     .where(eq(jobs.id, id));
@@ -728,6 +899,9 @@ export async function failJob(
           : Math.max(0, Math.round(processingSeconds)),
       workerId: null,
       claimedAt: null,
+      progressStage: "queued",
+      etaSeconds: null,
+      progressUpdatedAt: sql`CURRENT_TIMESTAMP`,
       updatedAt: sql`CURRENT_TIMESTAMP`,
     })
     .where(eq(jobs.id, id));
@@ -1631,10 +1805,28 @@ function mapJob(row: JobRow): IngestionJob {
     workerId: row.workerId,
     error: row.error,
     processingSeconds: row.processingSeconds,
+    progressPercent: row.progressPercent,
+    processedSeconds: row.processedSeconds,
+    totalSeconds: row.totalSeconds,
+    etaSeconds: row.etaSeconds,
+    progressStage: row.progressStage,
+    progressUpdatedAt: row.progressUpdatedAt,
+    latestEventSequence: row.latestEventSequence,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     claimedAt: row.claimedAt,
     completedAt: row.completedAt,
+  };
+}
+
+function mapJobEvent(row: JobEventRow): JobEvent {
+  return {
+    id: row.id,
+    jobId: row.jobId,
+    sequence: row.sequence,
+    type: row.type as JobEvent["type"],
+    payload: safeJson<JobEvent["payload"]>(row.payloadJson, {}),
+    createdAt: row.createdAt,
   };
 }
 

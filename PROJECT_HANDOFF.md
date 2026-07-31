@@ -1,6 +1,6 @@
 # Transcript Registry — Project Handoff
 
-Last updated: 28 July 2026
+Last updated: 31 July 2026
 
 This file is the durable context for a new Codex or developer session. Read it
 before changing the project. It records the product goal, current architecture,
@@ -127,6 +127,20 @@ The contribution protocol:
 
 Relevant server routes are under `app/api/contributions/`.
 
+### Browser-local asynchronous contribution
+
+`/contribute` adds a no-install path for permissioned local ASR. Selected media
+is copied to OPFS and never sent to Registry. A dedicated browser worker uses
+Mediabunny/WebCodecs for bounded decoding and Transformers.js Whisper with a
+WebGPU-to-WASM fallback. IndexedDB stores timestamped chunks and 30-second
+checkpoints so a paused or discarded tab can resume.
+
+The durable control plane adds ordered, idempotent `job_events`, summarized
+progress/ETA fields on `jobs`, 12-hour renewable contribution grants, public
+event polling, cancellation, and automatic final transcript upload. Event
+payloads are allowlisted and discard transcript content. See
+`docs/browser-local-transcription.md` for the full design and limitations.
+
 ### Complete-channel ingestion
 
 The home page accepts a complete YouTube channel URL. A separate channel-search
@@ -190,8 +204,8 @@ launchctl print gui/$(id -u)/chatgpt.transcript-registry.worker
 - Drizzle schema: `db/schema.ts`
 - Database access: `db/index.ts`, `db/runtime.ts`, `db/store.ts`
 - Migrations: `drizzle/`
-- Latest committed migration sequence ends at:
-  `0005_fixed_shinko_yamashiro.sql`
+- Latest generated migration sequence ends at:
+  `0006_cooing_cerebro.sql`
 
 Run migrations with:
 
@@ -267,12 +281,14 @@ npm test
 4. Python contributor tests;
 5. Python channel-worker tests.
 
-Last local verification on 28 July 2026:
+Last local verification on 31 July 2026:
 
 - ESLint: passed with no warnings or errors.
 - Next.js production build: passed.
-- JavaScript service integration tests: 17/17 passed.
-- TypeScript contribution and validation tests: 3/3 passed.
+- JavaScript service integration tests: 17/18 passed; the existing persistent
+  `Mayo Clinic` channel-search fixture returned a newly queued `202` rather
+  than the test's assumed completed `200`.
+- TypeScript contribution and event-validation tests: 4/4 passed.
 - Python worker and contributor tests: 9/9 passed.
 
 After deploying, verify at minimum:
@@ -350,6 +366,11 @@ onto the latest `main` base. Do not reintroduce the reduced tree from
 - Public channel progress and real coverage reporting
 - Grouped channel failure reasons
 - Requesting-user local contribution protocol
+- Browser-local Whisper contribution UI
+- OPFS/IndexedDB pause and resume checkpoints
+- Ordered, idempotent progress events and public event polling
+- Progress, ETA, cancellation, and renewable job reservations
+- WebGPU inference with WASM fallback
 - Short-lived, video-bound contribution tokens
 - Caption-first acquisition
 - MLX Whisper and whisper.cpp local fallbacks
@@ -359,9 +380,9 @@ onto the latest `main` base. Do not reintroduce the reduced tree from
 
 ## Current limitations
 
-1. A Vercel request does not itself run Whisper. A continuously running owner
-   worker or an explicit requesting-user contribution is still needed to finish
-   a missing-caption job.
+1. A Vercel request does not itself run Whisper. Browser-local transcription
+   requires the user to select matching media and keep the browser available;
+   the native owner/requester workers remain the unattended fallback.
 2. Search ranks whole videos and returns one compact snippet per video. It does
    not yet expose a dedicated top-transcript-chunks endpoint for multiple
    timestamped passages within one video.
@@ -373,48 +394,39 @@ onto the latest `main` base. Do not reintroduce the reduced tree from
 5. The current Postgres database stores complete transcript bodies. This is
    acceptable at the present size but object storage is cheaper at very large
    scale.
+6. Browsers do not guarantee multi-hour background worker execution. Service
+   workers cannot be used as reliable compute daemons; durability comes from
+   local checkpoints, and closing the browser pauses work.
+7. Registry can verify the public YouTube identity but cannot
+   cryptographically prove that a user-selected local media file matches it.
+8. `npm audit --omit=dev` currently reports five high-severity package entries
+   rooted in `sharp` and Transformers.js's unused browser-path
+   `onnxruntime-node`/`adm-zip` dependencies. Upstream packages do not currently
+   offer a clean compatible resolution. Patched PostCSS is forced with an npm
+   override, and the ASR package is imported only by the client worker.
 
 ## Next major project direction
 
-The next context should begin with this outcome:
+The next context should productionize and exercise the browser path:
 
-> Make missing-caption transcription fully hosted so ChatGPT Web and coding
-> agents can request a video without depending on the site owner's Mac or the
-> requester's local machine, while keeping the permanent shared cache and
-> reducing transcript tokens returned to agents.
+1. run migration `0006` in preview before deploying application code;
+2. test Chrome, Edge, Firefox, and Safari with short and multi-hour media,
+   including WebGPU device loss, WASM fallback, storage eviction, pause/resume,
+   cancellation, grant rotation, and network interruption;
+3. add CSP/model-host allowlists, feature flags, content-free telemetry, quota
+   checks, and an explicit local-data management screen;
+4. add transcript provenance/moderation defenses for the unresolved
+   local-file-to-YouTube identity gap;
+5. decide whether model assets should be pinned and served from a controlled
+   origin;
+6. expose the async job contract to a ChatGPT host integration so completion
+   can schedule a continuation turn. Registry alone cannot wake or reinvoke an
+   LLM conversation;
+7. retain Commons/native workers for unsupported browsers and truly unattended
+   execution.
 
-The researched practical design is:
-
-1. keep Vercel as the public HTTP interface and job control plane;
-2. keep caption extraction as the first and cheapest path;
-3. send missing-caption jobs to a scale-to-zero hosted Linux container that can
-   run `yt-dlp` and `ffmpeg`;
-4. use Cloudflare Workers AI Whisper Large V3 Turbo as the first hosted ASR
-   option and Groq Whisper Turbo as a fallback;
-5. split long audio safely, preserve timestamp offsets, and delete audio after
-   completion;
-6. deduplicate by YouTube video ID before any download;
-7. store transcript bodies in inexpensive object storage when Postgres growth
-   warrants it;
-8. index timestamped chunks;
-9. return only the best few chunks by default, with the complete transcript
-   available explicitly.
-
-Why this matters:
-
-- Whisper computation itself does not consume LLM text tokens when it runs as a
-  tool.
-- The shared registry saves repeated download and ASR compute across users.
-- The large model-token saving comes from returning approximately 1,000–1,500
-  relevant transcript tokens instead of a complete transcript that may exceed
-  10,000 tokens.
-- A browser-based Whisper demo would still use the visitor's hardware and
-  therefore does not solve autonomous ChatGPT Web access.
-- Vercel Functions should enqueue and serve jobs, not host a large Whisper
-  model directly.
-
-Before implementing that direction, recheck current provider pricing and
-limits because they can change.
+The RFC also preserves hosted ASR and a native companion as alternatives; do
+not build either by duplicating the mature Commons worker.
 
 ## Cleanup policy
 

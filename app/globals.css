@@ -44,6 +44,19 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+select {
+  padding: 0.65rem;
+  border: 1px solid #555;
+  background: #fff;
+  color: #111;
+  font: inherit;
+}
+
 a {
   color: inherit;
 }
@@ -106,6 +119,48 @@ td {
 progress {
   width: min(40rem, 100%);
   height: 1rem;
+}
+
+.local-contribution-form {
+  display: grid;
+  gap: 1rem;
+  max-width: 48rem;
+}
+
+.local-contribution-form label:not(.checkbox-row) {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: start;
+  gap: 0.65rem;
+}
+
+.checkbox-row input {
+  flex: none;
+  margin-top: 0.35rem;
+}
+
+.local-job-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.local-job {
+  padding: 1rem;
+  border: 1px solid #ccc;
+}
+
+.local-job h3 {
+  margin-top: 0;
+}
+
+.job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 @media (max-width: 36rem) {

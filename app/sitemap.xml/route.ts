@@ -7,6 +7,7 @@ export async function GET(request: Request): Promise<Response> {
   const transcripts = await listTranscriptIds();
   const urls = [
     `<url><loc>${escapeXml(origin)}</loc></url>`,
+    `<url><loc>${escapeXml(`${origin}/contribute`)}</loc></url>`,
     ...transcripts.map(
       (transcript) =>
         `<url><loc>${escapeXml(`${origin}/youtube/${transcript.providerId}`)}</loc><lastmod>${escapeXml(transcript.updatedAt)}</lastmod></url>`,

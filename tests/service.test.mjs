@@ -163,6 +163,15 @@ test("publishes local contributor scripts and agent instructions", async () => {
   assert.match(await shell.text(), /transcript-registry/);
 });
 
+test("publishes the browser-local transcription interface", async () => {
+  const response = await request("/contribute");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Transcribe on this device/);
+  assert.match(html, /audio or video stays inside this browser/i);
+  assert.match(html, /permission to transcribe/i);
+});
+
 test("rejects a video URL submitted as a channel", async () => {
   const response = await request("/api/channels", {
     method: "POST",
@@ -227,6 +236,7 @@ test("publishes crawler rules and machine endpoint instructions", async () => {
   assert.match(llms, /\/search\.txt\?q=QUERY/);
   assert.match(llms, /\/on-demand\.json\?url=YOUTUBE_URL/);
   assert.match(llms, /\/contribute\.txt/);
+  assert.match(llms, /Browser-local transcription: .*\/contribute/);
   assert.match(llms, /\/youtube\/VIDEO_ID\.txt/);
 });
 
